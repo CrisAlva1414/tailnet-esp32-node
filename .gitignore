@@ -1,0 +1,26 @@
+# Build ESP-IDF
+build/
+.vscode/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# Secretos y material criptográfico — NUNCA se commitea
+*.pem
+*.key
+*.der
+secrets.yaml
+secrets.*.yaml
+!secrets.yaml.template
+.env
+.env.*
+
+# Artefactos de flasheo/depuración que pueden contener volcados de memoria
+*.bin
+*.elf.map
+coredump*
+
+# Sistema
+.DS_Store
+*.swp
