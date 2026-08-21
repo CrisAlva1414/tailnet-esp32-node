@@ -5,7 +5,17 @@ esta base de código; §4 son las reglas de seguridad/estabilidad que no cambian
 
 ## Estándar y flags
 
-- C11. Compilación con `-std=c11 -Wall -Wextra -Wpedantic -Werror`.
+- C11 como estándar del lenguaje, compilado con dialecto GNU:
+  `-std=gnu11 -Wall -Wextra -Wpedantic -Werror`.
+- Por qué `gnu11` y no `c11` estricto: los headers de ESP-IDF/newlib que
+  llegan transitivamente (`esp_log.h` → `stdio.h`) usan `#include_next` y
+  macros variádicas GNU (`ESP_LOGx`), que `-Wpedantic` rechaza bajo ISO
+  estricto. ESP-IDF compila su propio árbol con dialecto GNU por la misma
+  razón. Para el código propio el efecto es nulo: todos los warnings siguen
+  activos y `-Werror` no negocia nada.
+- **Pendiente**: AGENTS.md §4 dice literalmente `-std=c11`. Esta desviación
+  vive documentada acá; actualizar §4 requiere confirmación explícita del
+  usuario (AGENTS.md §11) y todavía no ocurrió.
 - `-Werror` se mantiene siempre activo en CI y en build local. No se comitea
   código que solo compila con warnings suprimidos.
 - Formateo automático: `.clang-format` en la raíz del repo es la configuración

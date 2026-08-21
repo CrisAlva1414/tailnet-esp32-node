@@ -18,6 +18,6 @@ static const char *TAG = "tailnet_init";
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "tailnet-esp32-node: build de inicializacion, sin logica de protocolo aun");
-    ESP_LOGI(TAG, "ver AGENTS.md y docs/adr/ antes de continuar el desarrollo");
+    ESP_LOGI(TAG, "%s", "tailnet-esp32-node: build de inicializacion, sin logica de protocolo aun");
+    ESP_LOGI(TAG, "%s", "ver AGENTS.md y docs/adr/ antes de continuar el desarrollo");
 }
