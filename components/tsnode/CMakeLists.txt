@@ -7,5 +7,5 @@ idf_component_register(
     SRCS "src/tsnode.c"
          "src/port/esp_idf/tsnode_port_esp_idf.c"
     INCLUDE_DIRS "include"
-    PRIV_INCLUDE_DIRS "src"
+    PRIV_INCLUDE_DIRS "src" "src/port"
 )

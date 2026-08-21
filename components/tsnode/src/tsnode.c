@@ -6,6 +6,8 @@
  * exclusivamente vía src/port/tsnode_port.h.
  */
 
+#include <stddef.h>
+
 #include "tsnode.h"
 
 #include "tsnode_err.h"
