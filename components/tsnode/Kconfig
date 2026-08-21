@@ -1,0 +1,13 @@
+menu "tsnode"
+
+    config TSNODE_LOG_LEVEL
+        int "tsnode log verbosity (0=silent .. 5=verbose)"
+        default 1
+        range 0 5
+        help
+            Verbosidad de los logs del componente. El default es conservador:
+            en produccion los logs no deben exponer material sensible
+            (AGENTS.md 2.1). Los niveles altos son solo para el banco de
+            pruebas.
+
+endmenu

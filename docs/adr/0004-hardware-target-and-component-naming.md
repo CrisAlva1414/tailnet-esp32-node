@@ -3,6 +3,7 @@
 - Estado: propuesto (esperando confirmación explícita del usuario para pasar a `aceptado`)
 - Fecha: 2026-08-20
 - Actualizado: 2026-08-20 — revisado por primer dispositivo real: M5Stack Core 2 (ESP32 clásico) como target primario de validación, ESP32-C3 pasa a secundario
+- Actualizado: 2026-08-20 — alcance ampliado por el usuario: la librería debe servir a una familia de dispositivos ESP32 para domótica/automatización, no solo al intercomunicador. La política de familia de targets pasa a estar definida en ADR-0006 (tiers por target); este ADR conserva el rol de validación del Core 2 como primario v1
 
 ## Contexto
 
@@ -32,6 +33,13 @@ componente), con esta jerarquía explícita:
 |---|---|---|
 | **Primario v1** | ESP32 clásico — M5Stack Core 2 (ESP32-D0WDQ6-V3) | Validación y primer despliegue real (intercomunicador) |
 | Secundario | ESP32-C3, revisión ≥ v0.3 (ECO3) | Soportado por el componente; se valida cuando exista hardware |
+
+**Nota de la ampliación de alcance (2026-08-20):** con la expansión a
+domótica/automatización multi-dispositivo, esta tabla deja de ser la política
+de targets completa — queda subsumida por los tiers de ADR-0006 (Tier 1:
+esp32, esp32c3, esp32s3, esp32c6; Tier 2: s2/c2; excluido h2). El rol de
+este ADR pasa a ser: fijar el Core 2 como hardware de validación primaria v1
+y documentar sus especificidades.
 
 "Primario" significa: cada cambio se compila y prueba primero aquí; CI
 compila ambos, pero los test vectors y pruebas en hardware real corren contra

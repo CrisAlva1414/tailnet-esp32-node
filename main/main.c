@@ -14,10 +14,27 @@
 
 #include "esp_log.h"
 
+#include "tsnode.h"
+
 static const char *TAG = "tailnet_init";
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "%s", "tailnet-esp32-node: build de inicializacion, sin logica de protocolo aun");
-    ESP_LOGI(TAG, "%s", "ver AGENTS.md y docs/adr/ antes de continuar el desarrollo");
+    ESP_LOGI(TAG, "%s", "tailnet-esp32-node: build de inicializacion");
+
+    tsnode_err_t err = tsnode_init();
+    ESP_LOGI(TAG, "tsnode_init -> %s", tsnode_err_name(err));
+
+    tsnode_state_t state = TSNODE_STATE_STOPPED;
+    err = tsnode_state_get(&state);
+    if (err == TSNODE_OK) {
+        ESP_LOGI(TAG, "tsnode state -> %s", tsnode_state_name(state));
+    } else {
+        ESP_LOGE(TAG, "tsnode_state_get -> %s", tsnode_err_name(err));
+    }
+
+    err = tsnode_start();
+    /* Bloqueado por diseño hasta ADR-0002/0003 aceptados: ver tsnode_start()
+     * y docs/sessions/. No es un error de runtime, es el estado del proyecto. */
+    ESP_LOGI(TAG, "tsnode_start -> %s", tsnode_err_name(err));
 }

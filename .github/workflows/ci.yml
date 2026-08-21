@@ -12,10 +12,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # ADR-0004: primario esp32 (M5Stack Core 2), secundario esp32c3.
-        # Ambos deben compilar siempre; ninguna divergencia de plataforma
-        # pasa inadvertida.
-        target: [esp32, esp32c3]
+        # ADR-0006 Tier 1: toda la familia con soporte prometido debe
+        # compilar en cada push; ninguna divergencia de plataforma pasa
+        # inadvertida. Tier 2 (s2/c2) entra cuando exista hardware real.
+        target: [esp32, esp32c3, esp32s3, esp32c6]
     steps:
       - uses: actions/checkout@v4
       - name: Build ${{ matrix.target }}
@@ -32,6 +32,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install cppcheck
         run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: Guard architecture (core must not include platform headers)
+        # ADR-0006: el core de tsnode es C puro; solo port/esp_idf toca
+        # headers de plataforma. Violación = build rojo, no deuda silenciosa.
+        run: |
+          if grep -rn -E '#include *[<"](esp_|freertos|nvs|driver|lwip)' \
+               components/tsnode/src --include='*.c' --include='*.h' \
+               --exclude-dir=esp_idf; then
+            echo "::error::core de tsnode incluye headers de plataforma (ADR-0006)"
+            exit 1
+          fi
       - name: Run cppcheck
         # Flags versionados en docs/format/static-analysis.md — mantener ambos en sync.
         run: |
