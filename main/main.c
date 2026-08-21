@@ -10,16 +10,9 @@
  * Ver AGENTS.md antes de modificar este archivo.
  */
 
-/* Headers de ESP-IDF/newlib disparan -Wpedantic (#include_next, macros
- * variádicas GNU) incluso en dialecto gnu. Se suprime pedantic SOLO
- * durante su inclusión; todo el código propio queda bajo -Wpedantic
- * completo. Convención obligatoria: ver docs/format/c-style.md. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
 #include <stdio.h>
 
 #include "esp_log.h"
-#pragma GCC diagnostic pop
 
 static const char *TAG = "tailnet_init";
 

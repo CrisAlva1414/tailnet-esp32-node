@@ -6,31 +6,25 @@ esta base de código; §4 son las reglas de seguridad/estabilidad que no cambian
 ## Estándar y flags
 
 - C11 como estándar del lenguaje, compilado con dialecto GNU:
-  `-std=gnu11 -Wall -Wextra -Wpedantic -Werror`.
-- Por qué `gnu11` y no `c11` estricto: los headers de ESP-IDF/newlib que
-  llegan transitivamente (`esp_log.h` → `stdio.h`) usan `#include_next` y
-  macros variádicas GNU (`ESP_LOGx`), que `-Wpedantic` rechaza bajo ISO
-  estricto. ESP-IDF compila su propio árbol con dialecto GNU por la misma
-  razón. Para el código propio el efecto es nulo: todos los warnings siguen
-  activos y `-Werror` no negocia nada.
-- **Pendiente**: AGENTS.md §4 dice literalmente `-std=c11`. Esta desviación
-  vive documentada acá; actualizar §4 requiere confirmación explícita del
-  usuario (AGENTS.md §11) y todavía no ocurrió.
-- `-Wpedantic` marca `#include_next` de newlib y macros variádicas GNU de
-  ESP-IDF incluso bajo dialecto gnu (el pedwarn viene del preprocesador, no
-  depende del modo ISO). Por eso, **todo `.c` que incluya headers de
-  ESP-IDF/third-party debe envolver esos includes en el bloque**:
-
-  ```c
-  #pragma GCC diagnostic push
-  #pragma GCC diagnostic ignored "-Wpedantic"
-  #include "esp_log.h"
-  #pragma GCC diagnostic pop
-  ```
-
-  El código propio nunca va dentro de ese bloque: `-Wpedantic` se aplica
-  completo a todo lo nuestro. Includes propios (`tsnode_*.h`) van fuera del
-  bloque.
+  `-std=gnu11 -Wall -Wextra -Werror`.
+- **Sin `-Wpedantic` en firmware** (desviación de AGENTS.md §4, pendiente de
+  confirmación del usuario): los headers de ESP-IDF/newlib disparan pedwarns
+  a nivel preprocesador (`#include_next is a GCC extension`) que se emiten
+  incluso bajo dialecto gnu y que **no** respetan `#pragma GCC diagnostic`
+  scoped (verificado empíricamente en CI: runs 32434703866 y 32434949932).
+  No existe flag granular para ese pedwarn: es `-Wpedantic` o nada.
+- Compensación: los parsers de protocolo —donde pedantic más importa— se
+  testean en host (`tests/unit/`, sin headers de ESP-IDF) con
+  `-std=c11 -Wall -Wextra -Wpedantic -Werror` completos. El firmware queda
+  con Wall/Wextra/Werror sobre todo el código propio.
+- Alternativa evaluada y rechazada: shim dir con `-isystem` para re-marcar
+  como system los headers de IDF (suprime pedantic dentro de ellos).
+  Funciona, pero exige un shim por cada header usado; complejidad no
+  justificada en esta etapa. Se re-evaluará cuando `tsnode` tenga módulos
+  reales.
+- **Pendiente**: AGENTS.md §4 dice literalmente `-std=c11 ... -Wpedantic`.
+  Actualizarlo requiere confirmación explícita del usuario (AGENTS.md §11)
+  y todavía no ocurrió.
 - `-Werror` se mantiene siempre activo en CI y en build local. No se comitea
   código que solo compila con warnings suprimidos.
 - Formateo automático: `.clang-format` en la raíz del repo es la configuración
