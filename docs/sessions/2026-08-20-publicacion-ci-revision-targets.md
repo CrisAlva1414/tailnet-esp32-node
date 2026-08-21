@@ -32,6 +32,16 @@ licencia permisiva, y agregar integraciones que aceleren el desarrollo.
 - `.clang-format` + puntero en `docs/format/c-style.md`.
 - `README.md` — targets actualizados (Core 2 primario, C3 secundario),
   referencia a ADRs 0004/0005.
+- Debug de CI (runs 32434301795 → 32435176542): los builds fallaban porque
+  `-std=c11 -Wpedantic -Werror` choca contra headers de ESP-IDF/newlib.
+  Tres iteraciones: gnu11 no alcanza (el pedwarn de `#include_next` lo emite
+  el preprocesador y no depende del modo ISO); `#pragma GCC diagnostic`
+  scoped tampoco lo suprime (verificado en runs 32434703866 y 32434949932).
+  Resolución final: firmware con `-std=gnu11 -Wall -Wextra -Werror`, sin
+  `-Wpedantic`; compensación documentada — parsers de protocolo se compilarán
+  en host (`tests/unit/`) con pedantic completo. Convención fijada en
+  `docs/format/c-style.md`. CI verde en run 32435176542 (cppcheck + esp32 +
+  esp32c3).
 
 ## Decisiones de seguridad tomadas o revisadas
 
@@ -52,7 +62,12 @@ licencia permisiva, y agregar integraciones que aceleren el desarrollo.
 - Confirmación única del usuario sobre los cinco ADRs (0002–0005), todos en
   `propuesto`. Tras confirmación: pasarlos a `aceptado`, crear
   `sdkconfig.defaults` (+ dev/prod), fijar pin de ESP-IDF definitivo.
-- Verificar que el primer run de CI quede verde (build v5.5 en ambos targets);
-  ajustar pin de versión si el tag no existiera.
+- **Nueva desviación de AGENTS.md §4 pendiente de la misma confirmación**:
+  firmware compila con `-std=gnu11 -Wall -Wextra -Werror` (sin `-Wpedantic`,
+  incompatible con headers de ESP-IDF/newlib; evidencia y compensación en
+  `docs/format/c-style.md`). §4 requiere actualización formal cuando el
+  usuario confirme.
+- Anotación no bloqueante en CI: `actions/checkout@v4` corre forzado sobre
+  Node 24 (deprecation de Node 20); migrar a checkout@v5+ cuando exista.
 - Próxima sesión de código: `main.c` mínimo Wi-Fi + logs, previo ADR de
   arquitectura de protocolo antes de tocar ts2021.
