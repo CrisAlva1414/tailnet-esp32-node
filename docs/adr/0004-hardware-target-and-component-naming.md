@@ -1,6 +1,6 @@
 # ADR-0004: Target de hardware y nombre del componente
 
-- Estado: propuesto (esperando confirmación explícita del usuario para pasar a `aceptado`)
+- Estado: aceptado (confirmado por el usuario en el chat, 2026-08-20)
 - Fecha: 2026-08-20
 - Actualizado: 2026-08-20 — revisado por primer dispositivo real: M5Stack Core 2 (ESP32 clásico) como target primario de validación, ESP32-C3 pasa a secundario
 - Actualizado: 2026-08-20 — alcance ampliado por el usuario: la librería debe servir a una familia de dispositivos ESP32 para domótica/automatización, no solo al intercomunicador. La política de familia de targets pasa a estar definida en ADR-0006 (tiers por target); este ADR conserva el rol de validación del Core 2 como primario v1

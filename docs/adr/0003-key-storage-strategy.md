@@ -1,6 +1,6 @@
 # ADR-0003: Estrategia de almacenamiento de claves en flash
 
-- Estado: propuesto (completo, esperando confirmación explícita del usuario para pasar a `aceptado`; el canal de provisioning ya estaba decidido y aceptado)
+- Estado: aceptado (confirmado por el usuario en el chat, 2026-08-20)
 - Fecha: 2026-08-20
 - Actualizado: 2026-08-20 — decisión de canal de provisioning inicial
 - Actualizado: 2026-08-20 — resueltos NVS encryption, flash encryption, alcance de Secure Boot v2 y eFuses de debug (segunda sesión de trabajo)

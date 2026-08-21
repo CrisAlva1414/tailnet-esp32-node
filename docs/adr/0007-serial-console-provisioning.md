@@ -1,6 +1,6 @@
 # ADR-0007: Provisioning de credenciales por consola serie
 
-- Estado: propuesto (esperando confirmación explícita del usuario para pasar a `aceptado`)
+- Estado: aceptado (confirmado por el usuario en el chat, 2026-08-20)
 - Fecha: 2026-08-20
 
 ## Contexto

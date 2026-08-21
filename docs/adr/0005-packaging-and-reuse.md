@@ -1,6 +1,6 @@
 # ADR-0005: Estrategia de empaquetado y reúso del componente `tsnode`
 
-- Estado: propuesto (esperando confirmación explícita del usuario para pasar a `aceptado`)
+- Estado: aceptado (confirmado por el usuario en el chat, 2026-08-20)
 - Fecha: 2026-08-20
 
 ## Contexto

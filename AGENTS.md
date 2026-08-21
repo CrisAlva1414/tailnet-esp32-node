@@ -188,9 +188,14 @@ de ESP-IDF sin lógica de Tailscale todavía. La lógica de protocolo empieza
 Este proyecto es C, no "C con hábitos de C++". Se aplica sobre ESP-IDF (que expone
 FreeRTOS + libc de newlib), target embebido con RAM y flash limitados.
 
-- **Estándar**: C11, `-std=c11 -Wall -Wextra -Wpedantic -Werror`. `-Werror` no se
-  desactiva "temporalmente" para avanzar más rápido; si algo rompe el build por un
-  warning, se arregla el warning.
+- **Estándar**: C11 con dialecto GNU. Firmware: `-std=gnu11 -Wall -Wextra
+  -Werror` (sin `-Wpedantic`: los headers de ESP-IDF/newlib disparan pedwarns
+  de preprocesador insuprimibles; evidencia y compensación en
+  `docs/format/c-style.md`). Tests host (`tests/unit/`, sin headers de
+  ESP-IDF): `-std=c11 -Wall -Wextra -Wpedantic -Werror` completos.
+  Actualizado 2026-08-20 con confirmación explícita del usuario en el chat.
+  `-Werror` no se desactiva "temporalmente" para avanzar más rápido; si algo
+  rompe el build por un warning, se arregla el warning.
 - **Sin asignación dinámica no acotada en runtime crítico**: preferir buffers
   estáticos con tamaño máximo conocido en compile time para todo lo que toca el
   hot path de red/crypto. Si se necesita heap, documentar por qué en el ADR
