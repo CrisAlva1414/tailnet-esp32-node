@@ -43,8 +43,12 @@ código de `tailscale/tailscale` y formalizar el resultado como ADR-0008.
 ## Pendiente / bloqueado
 
 - **ADR-0008 espera aceptación del usuario** antes de escribir código de protocolo
-  (bloqueante per AGENTS.md §5.1).
-- Recordatorio pendiente de confirmación: revocar la auth key que apareció en el
-  chat el 2026-08-20 (no fue usada ni almacenada).
+  (bloqueante per AGENTS.md §5.1). El usuario pidió continuar al día siguiente.
+- Cerrado: el usuario confirmó haber revocado la auth key expuesta en el chat del
+  2026-08-20 apenas se le notificó (nunca fue usada ni almacenada por este repo).
+  Para el registro futuro: cuando exista el stack de registro, generar una auth key
+  fresca one-off con expiración corta y tag `tag:esp32-iot`.
+- Dispositivo apagado a fin de sesión: sin procesos reteniendo `/dev/ttyACM0`;
+  el Core 2 se alimenta por USB, queda desconectado físicamente por el usuario.
 - Siguiente sesión post-aceptación: esqueleto de `proto/ts2021.c` +
   `crypto/blake2s.c` con test vectors, y medición inicial de timing crypto.
