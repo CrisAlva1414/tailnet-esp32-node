@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # ADR-0004: primario esp32 (M5Stack Core 2), secundario esp32c3.
+        # Ambos deben compilar siempre; ninguna divergencia de plataforma
+        # pasa inadvertida.
+        target: [esp32, esp32c3]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ${{ matrix.target }}
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5
+          target: ${{ matrix.target }}
+          path: .
+
+  static-analysis:
+    name: cppcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: Run cppcheck
+        # Flags versionados en docs/format/static-analysis.md — mantener ambos en sync.
+        run: |
+          cppcheck \
+            --enable=warning,portability \
+            --std=c11 \
+            --language=c \
+            --inline-suppr \
+            --suppress=missingIncludeSystem \
+            --error-exitcode=1 \
+            -I components/tsnode/include \
+            main components/tsnode/src
