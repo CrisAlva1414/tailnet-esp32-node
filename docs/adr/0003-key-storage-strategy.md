@@ -4,6 +4,7 @@
 - Fecha: 2026-08-20
 - Actualizado: 2026-08-20 — decisión de canal de provisioning inicial
 - Actualizado: 2026-08-20 — resueltos NVS encryption, flash encryption, alcance de Secure Boot v2 y eFuses de debug (segunda sesión de trabajo)
+- Actualizado: 2026-08-20 — revisado por primer dispositivo real (M5Stack Core 2, ESP32 clásico): esquema NVS unificado flash-enc-based y matizaciones por target (tercera pasada)
 
 ## Contexto
 
@@ -16,35 +17,42 @@ protecciones nativas del SoC. Ver AGENTS.md §2.1.
 ## Decisión
 
 Los símbolos de configuración citados abajo fueron verificados contra la
-documentación oficial de ESP-IDF para ESP32-C3 (docs.espressif.com, sección
-Security y API Reference de NVS Encryption) en la fecha de este ADR. Deben
-re-verificarse contra la versión de ESP-IDF que se fije como pin del proyecto
-cuando exista `sdkconfig.defaults`.
+documentación oficial de ESP-IDF (docs.espressif.com, sección Security y API
+Reference de NVS Encryption) en la fecha de este ADR. La revisión de la tercera
+pasada introduce **multi-target** (ver ADR-0004): validación primaria sobre
+ESP32 clásico (M5Stack Core 2), secundaria sobre ESP32-C3. Los detalles que
+difieren por chip se marcan explícitamente; los específicos del ESP32 clásico
+se re-verifican contra su documentación propia al crear `sdkconfig.defaults`.
 
 ### NVS encryption — decidido
 
 Se activa `CONFIG_NVS_ENCRYPTION` con esquema de protección de claves
-**HMAC-based**: `CONFIG_NVS_SEC_KEY_PROTECTION_SCHEME` →
-`CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC`, con `CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID`
-configurado a un bloque eFuse designado (rango válido HMAC_KEY0..HMAC_KEY5;
-el default `-1` no es usable, hay que fijarlo explícitamente).
+**flash-encryption-based**, unificado para todos los targets:
+`CONFIG_NVS_SEC_KEY_PROTECTION_SCHEME` → `CONFIG_NVS_SEC_KEY_PROTECT_USING_FLASH_ENC`.
 
-Con este esquema, las claves XTS que cifran el contenido de NVS **se derivan en
-runtime desde una clave HMAC quemada en eFuse** (propósito
-`ESP_EFUSE_KEY_PURPOSE_HMAC_UP`, read-protected por hardware) y nunca se
-almacenan en flash. No se requiere partición `nvs_keys`. Esto cifra todo el
-namespace de credenciales: node key, auth key transitoria, SSID/PSK Wi-Fi (que
-el driver Wi-Fi persiste en la NVS default).
+Con este esquema, las claves XTS que cifran el contenido de NVS se almacenan
+en una partición dedicada `nvs_keys` (tipo `data`, subtipo `nvs_keys`,
+marcada `encrypted`, tamaño mínimo 4 KB en la tabla de particiones), generadas
+on-chip por `nvs_flash_init()` y protegidas a su vez por flash encryption.
+Esto cifra todo el namespace de credenciales: node key, auth key transitoria,
+SSID/PSK Wi-Fi (que el driver Wi-Fi persiste en la NVS default).
 
-Asignación de bloques eFuse designada (verificar con `idf.py efuse-summary`
-durante provisioning):
+Motivo de la revisión: el esquema HMAC-based propuesto inicialmente requiere
+el periférico HMAC, **inexistente en el ESP32 clásico** — el SoC del primer
+dispositivo real del proyecto (M5Stack Core 2). Ante la alternativa de
+mantener dos esquemas según chip (dos caminos de código, dos superficies de
+testeo, divergencia auditiva entre dispositivos de la flota), se unifica en
+flash-enc-based, que funciona idéntico en ambos targets. El trade-off aceptado
+explícitamente: todo el material secreto queda bajo una única raíz de
+confianza (la clave de flash encryption en eFuse). Se considera aceptable
+porque extraer esa clave eFuse read-protected exige exactamente la clase de
+ataque físico sofisticado ya excluida del alcance v1 en ADR-0002.
 
-- `BLOCK_KEY0`: clave de flash encryption (default de ESP-IDF, generado en el
-  primer boot, read/write-protected).
-- `BLOCK_KEY1`: clave HMAC para derivación de claves NVS (quemada durante
-  provisioning, read-protected).
-- Resto de bloques: libres; los que queden sin usar al cerrar el dispositivo
-  como producción se documentan en el checklist de despliegue.
+Asignación de bloques eFuse (verificar con `idf.py efuse-summary` durante
+provisioning): `BLOCK_KEY0` / bloque equivalente del target = clave de flash
+encryption (generada en el primer boot, read/write-protected). Resto de
+bloques libres; los que queden sin usar al cerrar un dispositivo como
+producción se documentan en el checklist de despliegue.
 
 ### Flash encryption — decidido
 
@@ -56,9 +64,14 @@ Configuración de build:
 - `CONFIG_SECURE_UART_ROM_DL_MODE` = "Permanently switch to Secure mode"
   (recomendación de Espressif; limita el ROM download mode a comandos básicos).
 
-Algoritmo en C3: XTS-AES con clave de 256 bits generada por el propio chip en
-el primer boot (RNG interno), almacenada en `BLOCK_KEY0` con read/write
-protection de eFuse. La clave jamás es accesible por software.
+Algoritmo: difiere por target — en C3 es XTS-AES con clave de 256 bits; en
+ESP32 clásico es AES-256 con tweak por bloque y el eFuse de control es
+`FLASH_CRYPT_CNT` (un solo bit, no tres como `SPI_BOOT_CRYPT_CNT` del C3).
+En ambos casos la clave la genera el propio chip en el primer boot (RNG
+interno), queda en eFuse read/write-protected, y jamás es accesible por
+software. Los nombres exactos de eFuses y símbolos del ESP32 clásico se
+verifican contra su documentación específica al crear `sdkconfig.defaults`
+(no se asumen por analogía con C3).
 
 Procedimiento de activación (primer flasheo de un dispositivo):
 
@@ -68,12 +81,13 @@ Procedimiento de activación (primer flasheo de un dispositivo):
    `encrypted` (puede tardar hasta un minuto). **No cortar alimentación
    durante este proceso** — interrumpirlo corrompe la flash.
 3. En modo Release el bootloader quema `DIS_DOWNLOAD_MANUAL_ENCRYPT`,
-   write-protege `SPI_BOOT_CRYPT_CNT`, y deshabilita JTAG (ver sección de
+   write-protege el eFuse de control (`SPI_BOOT_CRYPT_CNT` en C3,
+   `FLASH_CRYPT_CNT` en ESP32 clásico), y deshabilita JTAG (ver sección de
    eFuses debug más abajo).
 
 Irreversibilidad, explícita:
 
-- Los eFuses quemados (`SPI_BOOT_CRYPT_CNT` write-protected,
+- Los eFuses quemados (eFuse de control write-protected,
   `DIS_DOWNLOAD_MANUAL_ENCRYPT`) son de un solo sentido. Un dispositivo en
   Release **no vuelve a Development**, y reflashear exige imágenes
   pre-cifradas con la clave (si se guardó copia en el host) u OTA.
@@ -114,11 +128,13 @@ Cuando se active, condiciones mínimas (registradas ahora para no improvisar):
 RSA-3072 (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES`, clave de firma generada
 offline con entropía de calidad y custodiada fuera de la máquina de build),
 revocación de slots de digest no usados, y **orden de quemado respetado**:
-las claves read-protected (flash encryption, HMAC de NVS) deben estar quemadas
-*antes* de activar SBv2, porque después de activarlo ESP-IDF bloquea nuevas
+las claves read-protected (flash encryption) deben estar quemadas *antes* de
+activar SBv2, porque después de activarlo ESP-IDF bloquea nuevas
 read-protecciones por default (`CONFIG_SECURE_BOOT_V2_ALLOW_EFUSE_RD_DIS`).
-Nota de hardware: SBv2 existe en C3 desde revisión de chip v0.3 (ECO3); ver
-ADR-0004 para la consecuencia sobre qué placas comprar.
+Notas de hardware: SBv2 existe en C3 desde revisión v0.3 (ECO3) y en ESP32
+clásico desde revisión 3 (ECO3). El Core 2 lleva ESP32-D0WDQ6-**V3**, así que
+ambos targets del proyecto cumplen; la restricción de compra queda fijada en
+ADR-0004.
 
 ### eFuses de debug/JTAG y separación de builds — decidido
 
@@ -218,18 +234,16 @@ Mecanismo concreto (a implementar, no solo declarado):
 
 **Almacenamiento:**
 
-- **NVS encryption con esquema flash-encryption-based**
-  (`CONFIG_NVS_SEC_KEY_PROTECT_USING_FLASH_ENC`, claves XTS en partición
-  `nvs_keys` cifrada por flash encryption). Considerada seriamente: es el
-  esquema clásico, documentado en el ejemplo `security/flash_encryption`.
-  Descartada como elección primaria porque concentra *todo* el material
-  secreto bajo una única raíz de confianza (la clave de flash encryption):
-  un atacante hipotético que extraiga esa clave obtiene firmware y claves
-  NVS de una sola vez. El esquema HMAC desacopla las dos raíces al costo de
-  un bloque eFuse (de 6 disponibles). Cláusula de fallback: si el esquema
-  HMAC (`nvs_sec_provider`) mostrara problemas de estabilidad en la versión
-  de ESP-IDF que se fije como pin, se revierte a este esquema vía revisión de
-  este ADR — nunca vía cifrado hecho a mano.
+- **NVS encryption con esquema HMAC-based**
+  (`CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC`, claves XTS derivadas en runtime
+  desde una clave HMAC en eFuse, sin partición `nvs_keys`). Fue la elección
+  primaria de la segunda pasada: desacopla la confidencialidad de NVS de la
+  clave de flash encryption (dos raíces de confianza en vez de una). Descartada
+  en esta revisión por restricción de hardware dura: el periférico HMAC no
+  existe en el ESP32 clásico del primer dispositivo real (M5Stack Core 2), y
+  mantener dos esquemas según chip duplica caminos de código y de testeo en un
+  proyecto que prioriza auditabilidad. Queda como opción futura si algún día
+  una flota 100% C3/S3 justifica reabrir el trade-off vía ADR.
 - **Cifrado a nivel de aplicación hecho a mano** sobre NVS en claro.
   Descartado de plano: reinventar cifrado sobre un SoC que ofrece esto
   nativamente es exactamente el tipo de decisión que AGENTS.md §6 y este
@@ -248,11 +262,14 @@ Directas y centrales — este ADR define el mecanismo principal de mitigación
 para el eje de amenaza física completo (AGENTS.md §2.1):
 
 - Contra el caso base de ADR-0002 (dump SPI sin desoldar), el conjunto flash
-  encryption Release + NVS encryption HMAC-based deja al atacante con
+  encryption Release + NVS encryption flash-enc-based deja al atacante con
   ciphertext sin clave accesible: la clave de flash encryption vive read/write
-  protegida en eFuse y las claves NVS se derivan de una segunda clave eFuse
-  independiente. Ningún secreto del proyecto queda en flash en claro, ni
-  siquiera cifrado bajo una única raíz.
+  protegida en eFuse y las claves NVS están cifradas bajo ella. Ningún secreto
+  del proyecto queda en flash en claro. Trade-off declarado: es una única raíz
+  de confianza — pero extraerla exige exactamente la clase de ataque físico
+  sofisticado fuera de alcance v1, y la uniformidad entre targets reduce la
+  superficie de error de implementación, que es el riesgo más real a esta
+  altura del proyecto.
 - La decisión de provisioning por serial reduce a cero la superficie remota
   expuesta durante el setup inicial, al costo de requerir acceso físico para
   provisionar cada dispositivo (trade-off aceptado explícitamente: en este
@@ -281,11 +298,12 @@ para el eje de amenaza física completo (AGENTS.md §2.1):
   por SPI bootloader en otro proyecto — el mismo tipo de recuperación es
   sustancialmente más limitado o imposible en un ESP32 con estas protecciones
   activas.
-- Esquema HMAC de NVS: deriva claves en cada boot vía periférico HMAC — costo
-  despreciable frente al boot Wi-Fi, pero introduce dependencia del componente
-  `nvs_sec_provider`; su estabilidad en la versión pinneada de ESP-IDF se
-  verifica antes del primer build con NVS encryption (cláusula de fallback ya
-  definida).
+- Esquema flash-enc de NVS: requiere partición `nvs_keys` presente y
+  completamente vacía en el primer arranque que inicializa NVS (si contiene
+  datos malformados, `nvs_flash_init()` falla con
+  `ESP_ERR_NVS_CORRUPT_KEY_PART`) — el procedimiento de provisioning debe
+  garantizar el erase inicial de esa partición. Un solo esquema para todos
+  los targets significa un solo camino de código y una sola matriz de tests.
 - Secure Boot v2 pospuesto elimina por ahora sus costos de estabilidad
   (bootloader más grande, verificación en cada boot, riesgo de brick por
   revocación agresiva de claves); activarlo vía disparador re-introduce esos
