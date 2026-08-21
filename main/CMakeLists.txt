@@ -1,5 +1,9 @@
+# App de referencia del banco de pruebas (ADR-0006: capa de aplicación).
 idf_component_register(
     SRCS "main.c"
+         "console.c"
+         "wifi_app.c"
+         "prov_store.c"
     INCLUDE_DIRS "."
 )
 

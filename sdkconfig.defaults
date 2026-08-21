@@ -1,0 +1,21 @@
+# sdkconfig.defaults — tailnet-esp32-node
+#
+# Aplicado sobre los defaults de ESP-IDF en cada build nuevo (borrar el
+# sdkconfig local para regenerar). Lo que NO está acá a propósito: flash
+# encryption, NVS encryption y Secure Boot — esos se activan solo en la
+# preparación de una build de producción con su propio proceso de eFuses
+# (ADR-0003); ninguna imagen de banco sale del laboratorio del usuario.
+
+# Hardware real detectado: M5Stack Core 2, 16 MB flash (banco de pruebas,
+# sesión 2026-08-20-banco-pruebas-core2).
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# Partición factory más holgada que el default de 1 MB: margen para el
+# stack de protocolo sin pelear por espacio en esta etapa.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# Logs en INFO para el banco; bajar a ERROR/none recién en perfil de prod.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# Stack de la tarea main: console + wifi app conviven acá al arranque.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096

@@ -1,40 +1,54 @@
 /*
- * Punto de entrada mínimo de inicialización.
+ * App de referencia del banco de pruebas.
  *
- * Deliberadamente NO contiene todavía lógica de Wi-Fi, Tailscale, ni
- * criptografía. Ver docs/sessions/2026-08-20-init-repo.md: el código de
- * protocolo real empieza después de que ADR-0002 (modelo de amenaza) y
- * ADR-0003 (estrategia de almacenamiento de claves) pasen de "propuesto"
- * a "aceptado". No se debe agregar funcionalidad aquí sin ese ADR previo.
- *
- * Ver AGENTS.md antes de modificar este archivo.
+ * Capa de aplicación (ADR-0006): Wi-Fi + consola de provisioning viven
+ * acá, no en el componente. tsnode sigue siendo solo el cliente
+ * Tailscale; start() permanece bloqueado hasta el ADR de arquitectura de
+ * protocolo.
  */
 
-#include <stdio.h>
+#include <nvs_flash.h>
 
 #include "esp_log.h"
 
+#include "console.h"
+#include "prov_store.h"
 #include "tsnode.h"
+#include "wifi_app.h"
 
 static const char *TAG = "tailnet_init";
 
+static void init_nvs_or_panic(void)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        /* Partición NVS de una versión vieja: se reformatea. En banco es
+         * el camino estándar; en prod esto además exige revisión (las
+         * claves provisionadas se pierden). */
+        ESP_LOGW(TAG, "NVS requiere formateo (%s)", esp_err_to_name(err));
+        err = nvs_flash_erase();
+        if (err == ESP_OK) {
+            err = nvs_flash_init();
+        }
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_flash_init -> %s: sin NVS no hay provisioning",
+                 esp_err_to_name(err));
+        return;
+    }
+}
+
 void app_main(void)
 {
-    ESP_LOGI(TAG, "%s", "tailnet-esp32-node: build de inicializacion");
+    ESP_LOGI(TAG, "%s", "tailnet-esp32-node: app de referencia del banco");
 
-    tsnode_err_t err = tsnode_init();
-    ESP_LOGI(TAG, "tsnode_init -> %s", tsnode_err_name(err));
+    init_nvs_or_panic();
 
-    tsnode_state_t state = TSNODE_STATE_STOPPED;
-    err = tsnode_state_get(&state);
-    if (err == TSNODE_OK) {
-        ESP_LOGI(TAG, "tsnode state -> %s", tsnode_state_name(state));
-    } else {
-        ESP_LOGE(TAG, "tsnode_state_get -> %s", tsnode_err_name(err));
-    }
+    tsnode_err_t terr = tsnode_init();
+    ESP_LOGI(TAG, "tsnode_init -> %s", tsnode_err_name(terr));
 
-    err = tsnode_start();
-    /* Bloqueado por diseño hasta ADR-0002/0003 aceptados: ver tsnode_start()
-     * y docs/sessions/. No es un error de runtime, es el estado del proyecto. */
-    ESP_LOGI(TAG, "tsnode_start -> %s", tsnode_err_name(err));
+    terr = wifi_app_start();
+    ESP_LOGI(TAG, "wifi_app_start -> %s", tsnode_err_name(terr));
+
+    console_start();
 }
