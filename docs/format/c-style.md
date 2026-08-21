@@ -8,6 +8,9 @@ esta base de código; §4 son las reglas de seguridad/estabilidad que no cambian
 - C11. Compilación con `-std=c11 -Wall -Wextra -Wpedantic -Werror`.
 - `-Werror` se mantiene siempre activo en CI y en build local. No se comitea
   código que solo compila con warnings suprimidos.
+- Formateo automático: `.clang-format` en la raíz del repo es la configuración
+  canónica (indentación 4, límite 100 columnas). Este documento define las
+  convenciones que el formateador no cubre.
 
 ## Naming
 

@@ -1,0 +1,11 @@
+---
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: c++11
+IndentWidth: 4
+ColumnLimit: 100
+PointerAlignment: Right
+AlignConsecutiveMacros: Consecutive
+AllowShortFunctionsOnASingleLine: InlineOnly
+SortIncludes: CaseSensitive
+IncludeBlocks: Preserve

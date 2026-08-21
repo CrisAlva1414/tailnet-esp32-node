@@ -10,9 +10,15 @@ de arquitectura y seguridad, tomadas y pendientes.
 
 ## Qué es esto
 
-Llevar un ESP32 (target inicial: ESP32-C3) a una tailnet personal de Tailscale
-(SaaS, no Headscale), con IP 100.x.x.x y conectividad directa vía WireGuard
-sobre NAT traversal, priorizando por sobre todo: **seguridad y estabilidad**.
+Llevar dispositivos ESP32 a una tailnet personal de Tailscale (SaaS, no
+Headscale), con IP 100.x.x.x y conectividad directa vía WireGuard sobre NAT
+traversal, priorizando por sobre todo: **seguridad y estabilidad**.
+
+Targets (ver `docs/adr/0004-hardware-target-and-component-naming.md`):
+validación primaria v1 sobre **M5Stack Core 2** (ESP32 clásico, primer
+despliegue real: intercomunicador); ESP32-C3 soportado como target
+secundario. El componente `tsnode` es reutilizable como componente ESP-IDF en
+otros proyectos (`docs/adr/0005-packaging-and-reuse.md`).
 
 ## Qué NO es esto (v1)
 
@@ -44,7 +50,8 @@ versión soportada — se fijará en `sdkconfig.defaults` y en un ADR cuando el
 target de hardware quede confirmado).
 
 ```
-idf.py set-target esp32c3
+idf.py set-target esp32     # primario v1 (M5Stack Core 2)
+idf.py set-target esp32c3   # secundario
 idf.py build
 ```
 
