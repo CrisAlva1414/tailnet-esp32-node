@@ -16,6 +16,21 @@ esta base de código; §4 son las reglas de seguridad/estabilidad que no cambian
 - **Pendiente**: AGENTS.md §4 dice literalmente `-std=c11`. Esta desviación
   vive documentada acá; actualizar §4 requiere confirmación explícita del
   usuario (AGENTS.md §11) y todavía no ocurrió.
+- `-Wpedantic` marca `#include_next` de newlib y macros variádicas GNU de
+  ESP-IDF incluso bajo dialecto gnu (el pedwarn viene del preprocesador, no
+  depende del modo ISO). Por eso, **todo `.c` que incluya headers de
+  ESP-IDF/third-party debe envolver esos includes en el bloque**:
+
+  ```c
+  #pragma GCC diagnostic push
+  #pragma GCC diagnostic ignored "-Wpedantic"
+  #include "esp_log.h"
+  #pragma GCC diagnostic pop
+  ```
+
+  El código propio nunca va dentro de ese bloque: `-Wpedantic` se aplica
+  completo a todo lo nuestro. Includes propios (`tsnode_*.h`) van fuera del
+  bloque.
 - `-Werror` se mantiene siempre activo en CI y en build local. No se comitea
   código que solo compila con warnings suprimidos.
 - Formateo automático: `.clang-format` en la raíz del repo es la configuración
