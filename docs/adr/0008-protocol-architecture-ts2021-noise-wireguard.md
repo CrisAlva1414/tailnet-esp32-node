@@ -1,6 +1,6 @@
 # ADR-0008: Arquitectura de protocolo (ts2021 / Noise / WireGuard)
 
-- Estado: propuesto
+- Estado: aceptado
 - Fecha: 2026-08-21
 
 ## Contexto
