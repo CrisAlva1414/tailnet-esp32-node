@@ -39,6 +39,81 @@ tsnode_err_t tsnode_port_random_bytes(uint8_t *out, size_t len);
  */
 tsnode_err_t tsnode_port_uptime_ms(uint64_t *out_ms);
 
+/* --- Tarea (ADR-0006: FreeRTOS no se toca desde core) --- */
+
+typedef void (*tsnode_port_task_fn)(void *arg);
+tsnode_err_t tsnode_port_task_create(tsnode_port_task_fn fn, void *arg,
+                                     const char *name, size_t stack_bytes,
+                                     int priority);
+
+/* --- Logging (ADR-0006: sin headers de plataforma en core) --- */
+
+/* Log callback registrado por la app. level: 0=error, 1=warn, 2=info, 3=debug */
+typedef void (*tsnode_port_log_fn)(int level, const char *tag, const char *fmt,
+                                   ...);
+void tsnode_port_set_log(tsnode_port_log_fn fn);
+tsnode_port_log_fn tsnode_port_get_log(void);
+
+/* Convenience macros que delegan al callback registrado */
+#define TSNODE_LOGE(tag, fmt, ...) do { \
+    tsnode_port_log_fn _fn = tsnode_port_get_log(); \
+    if (_fn) _fn(0, tag, fmt, ##__VA_ARGS__); \
+} while (0)
+#define TSNODE_LOGW(tag, fmt, ...) do { \
+    tsnode_port_log_fn _fn = tsnode_port_get_log(); \
+    if (_fn) _fn(1, tag, fmt, ##__VA_ARGS__); \
+} while (0)
+#define TSNODE_LOGI(tag, fmt, ...) do { \
+    tsnode_port_log_fn _fn = tsnode_port_get_log(); \
+    if (_fn) _fn(2, tag, fmt, ##__VA_ARGS__); \
+} while (0)
+
+/* --- Red: sockets TCP/TLS para ts2021 (ADR-0008) --- */
+
+/*
+ * Descriptor de socket opaco. El valor real depende de la plataforma.
+ * El core solo usa los punteros a funciones que operan sobre él.
+ */
+typedef struct tsnode_port_socket tsnode_port_socket_t;
+
+/*
+ * Conecta TCP a host:port con timeout_ms. Retorna socket en out_sock.
+ * host es resuelto internamente (DNS). timeout_ms = 0 sin timeout.
+ */
+tsnode_err_t tsnode_port_tcp_connect(tsnode_port_socket_t **out_sock,
+                                     const char *host, uint16_t port,
+                                     uint32_t timeout_ms);
+
+/*
+ * Conecta TLS (HTTPS) con verificación de certificados.
+ * La CA store depende de la plataforma.
+ */
+tsnode_err_t tsnode_port_tls_connect(tsnode_port_socket_t **out_sock,
+                                     const char *host, uint16_t port,
+                                     uint32_t timeout_ms);
+
+/*
+ * Escribe exactamente nlen bytes con timeout. Falla TSNODE_ERR_TIMEOUT
+ * si se agota el tiempo parcialmente.
+ */
+tsnode_err_t tsnode_port_socket_write(tsnode_port_socket_t *sock,
+                                      const uint8_t *data, size_t nlen,
+                                      uint32_t timeout_ms);
+
+/*
+ * Lee hasta rlen bytes. Retorna en *nread cuántos bytes se leyeron.
+ * TSNODE_ERR_TIMEOUT si no llega nada antes del timeout.
+ * TSNODE_ERR_NETWORK si la conexión se cerró (nread == 0).
+ */
+tsnode_err_t tsnode_port_socket_read(tsnode_port_socket_t *sock,
+                                     uint8_t *buf, size_t buf_size,
+                                     size_t *nread, uint32_t timeout_ms);
+
+/*
+ * Cierra el socket y libia recursos. Idempotente.
+ */
+void tsnode_port_socket_close(tsnode_port_socket_t *sock);
+
 #ifdef __cplusplus
 }
 #endif

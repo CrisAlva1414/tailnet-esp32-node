@@ -2,9 +2,8 @@
  * App de referencia del banco de pruebas.
  *
  * Capa de aplicación (ADR-0006): Wi-Fi + consola de provisioning viven
- * acá, no en el componente. tsnode sigue siendo solo el cliente
- * Tailscale; start() permanece bloqueado hasta el ADR de arquitectura de
- * protocolo.
+ * acá, no en el componente. El cliente Tailscale se arranca después de
+ * WiFi y provisioning exitosos.
  */
 
 #include <nvs_flash.h>
@@ -22,9 +21,6 @@ static void init_nvs_or_panic(void)
 {
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        /* Partición NVS de una versión vieja: se reformatea. En banco es
-         * el camino estándar; en prod esto además exige revisión (las
-         * claves provisionadas se pierden). */
         ESP_LOGW(TAG, "NVS requiere formateo (%s)", esp_err_to_name(err));
         err = nvs_flash_erase();
         if (err == ESP_OK) {

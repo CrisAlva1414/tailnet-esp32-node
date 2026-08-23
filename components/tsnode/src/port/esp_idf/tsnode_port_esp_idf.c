@@ -4,11 +4,57 @@
  * Único lugar del componente donde se permiten headers de plataforma.
  */
 
+#include <stdarg.h>
+#include <stdio.h>
+
 #include <esp_err.h>
+#include <esp_log.h>
 #include <esp_random.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include "tsnode_port.h"
+
+/* ---- Logging ---- */
+
+static tsnode_port_log_fn s_log_fn;
+
+void tsnode_port_set_log(tsnode_port_log_fn fn)
+{
+    s_log_fn = fn;
+}
+
+tsnode_port_log_fn tsnode_port_get_log(void)
+{
+    return s_log_fn;
+}
+
+/* Default log implementation using ESP-IDF esp_log */
+static void default_log(int level, const char *tag, const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    esp_log_level_t esp_level;
+    switch (level) {
+    case 0:  esp_level = ESP_LOG_ERROR;   break;
+    case 1:  esp_level = ESP_LOG_WARN;    break;
+    case 2:  esp_level = ESP_LOG_INFO;    break;
+    default: esp_level = ESP_LOG_DEBUG;   break;
+    }
+    char buf[256];
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    /* Use esp_log_write with level and tag only — no timestamp format
+     * since ESP-IDF handles that internally. */
+    esp_log_write(esp_level, tag, "%s", buf);
+}
+
+__attribute__((constructor))
+static void init_default_log(void)
+{
+    s_log_fn = default_log;
+}
 
 tsnode_err_t tsnode_port_random_bytes(uint8_t *out, size_t len)
 {
@@ -34,5 +80,21 @@ tsnode_err_t tsnode_port_uptime_ms(uint64_t *out_ms)
     }
     /* esp_timer es monotónico, no depende de NTP ni ajustes de reloj. */
     *out_ms = (uint64_t)esp_timer_get_time() / 1000ULL;
+    return TSNODE_OK;
+}
+
+tsnode_err_t tsnode_port_task_create(tsnode_port_task_fn fn, void *arg,
+                                     const char *name, size_t stack_bytes,
+                                     int priority)
+{
+    if (fn == NULL) {
+        return TSNODE_ERR_INVALID_ARG;
+    }
+    BaseType_t ret = xTaskCreate((TaskFunction_t)fn, name ? name : "tsnode",
+                                  (uint32_t)(stack_bytes / sizeof(StackType_t)),
+                                  arg, priority, NULL);
+    if (ret != pdPASS) {
+        return TSNODE_ERR_NO_MEMORY;
+    }
     return TSNODE_OK;
 }

@@ -1,0 +1,73 @@
+/*
+ * Netmap: MapRequest/MapResponse sobre ts2021 (ADR-0008).
+ *
+ * POST /machine/map en modo polling (Stream=false).
+ * Parser mínimo: extrae solo lo que el data plane necesita.
+ *
+ * Este archivo es C puro: sin headers de plataforma (ADR-0006).
+ */
+
+#ifndef TSNODE_MAP_H
+#define TSNODE_MAP_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "tsnode_err.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Maximum peers we track (ESP32 memory constraint) */
+#define TSNODE_MAP_MAX_PEERS 16
+
+/* Parsed peer info (minimal subset of tailcfg.Node) */
+typedef struct {
+    uint8_t key[32];        /* WireGuard public key */
+    char    host_name[64];  /* peer hostname */
+    char    tailscale_ip[16]; /* "100.x.y.z" */
+    uint16_t listen_port;   /* WG listen port */
+    bool    online;         /* currently connected */
+} tsnode_map_peer_t;
+
+/* Parsed netmap (minimal) */
+typedef struct {
+    tsnode_map_peer_t peers[TSNODE_MAP_MAX_PEERS];
+    uint8_t  peer_count;
+    char     self_ip[16];       /* our 100.x.y.z */
+    uint8_t  self_node_key[32]; /* our node public key */
+    bool     dns_enabled;
+} tsnode_map_netmap_t;
+
+/*
+ * Build MapRequest JSON into buf.
+ * capability_version: Tailscale CurrentCapabilityVersion (145).
+ * stream: false for polling mode (one response per request).
+ * disco_key: our disco public key (32 bytes, zeroed if unused).
+ * hostname: our node hostname.
+ */
+tsnode_err_t tsnode_map_build_request(char *buf, size_t buf_size,
+                                      size_t *out_len,
+                                      const uint8_t node_key[32],
+                                      const uint8_t disco_key[32],
+                                      const char *hostname,
+                                      uint32_t capability_version,
+                                      bool stream);
+
+/*
+ * Parse MapResponse JSON into netmap.
+ * Minimal parser: extracts peers, self IP, node key.
+ * Ignores DERP map, DNS config, and other fields.
+ *
+ * MapResponse can be large; json_len may be the full response.
+ */
+tsnode_err_t tsnode_map_parse_response(tsnode_map_netmap_t *netmap,
+                                       const char *json, size_t json_len);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* TSNODE_MAP_H */
