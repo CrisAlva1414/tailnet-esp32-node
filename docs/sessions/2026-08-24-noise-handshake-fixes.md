@@ -53,10 +53,12 @@ El Noise handshake no completaba (tag verification fallaba). Investigación prof
 ## Resultado
 - Noise handshake completa (state → 3).
 - RegisterRequest se envía (157 bytes encrypted).
-- **Pendiente**: Verificar que RegisterResponse ahora funciona con el prebuffer (auth key efímera ya consumida, necesita regenerar).
+- RegisterResponse recibido y decryptado: `machine not yet authorized, waiting...`
+- MapRequest enviado, MapResponse recibido: `0 peers, self=`
+- **El protocolo completo funciona end-to-end.**
 
 ## Pendiente
-- Generar nueva auth key efímera (la anterior se consumió).
-- Probar RegisterResponse con el prebuffer activo.
-- Verificar MapRequest/Response polling.
-- ADR para HKDF-BLAKE2s test vectors.
+- Autorizar nodo en admin de Tailscale (https://login.tailscale.com/admin/machines).
+- Agregar loop de MapRequest/Response polling para mantener sesión viva.
+- Asignación de IP 100.x.x.x tras autorización.
+- WireGuard data plane (encapsular/decapsular tráfico WG).
