@@ -331,6 +331,97 @@ static tsnode_err_t do_connect(void)
                                leftover - 51);
     }
 
+    /* Consume EarlyNoise payload (if present).
+     *
+     * After the Noise handshake the server may push an "early payload"
+     * before any HTTP/2 communication.  Format (from conn.go):
+     *   5 bytes: magic "\xff\xff\xffTS"
+     *   4 bytes: payload length (big-endian uint32)
+     *   N bytes: JSON (e.g. {"nodeKeyChallenge":"chalpub:..."})
+     *
+     * The Go client's ts2021.Conn.readHeader() silently consumes this.
+     * The NodeKeyChallenge content is never used by the Go client, so we
+     * simply skip it.
+     *
+     * The magic and length may span multiple Noise transport records,
+     * so we accumulate bytes until we can check for the magic prefix. */
+    {
+        /* Accumulate at least 9 bytes (magic + length header) from the
+         * first Noise record(s).  We keep a small ring buffer for any
+         * bytes beyond the header that arrived in the same record. */
+        uint8_t early_hdr[9];
+        size_t hdr_have = 0;
+        uint8_t extra[512];    /* bytes beyond the 9-byte header */
+        size_t extra_len = 0;
+        bool is_early = false;
+
+        while (hdr_have < 9) {
+            uint8_t frame[512];
+            size_t frame_len;
+            err = ts2021_record_recv(&s_conn, frame, sizeof(frame), &frame_len);
+            if (err != TSNODE_OK) {
+                TSNODE_LOGE(TAG, "recv post-handshake frame failed: %d", err);
+                tsnode_port_socket_close(sock);
+                return err;
+            }
+            TSNODE_LOGI(TAG, "post-handshake frame: %zu bytes", frame_len);
+
+            /* How many bytes do we need to fill the header? */
+            size_t need = 9 - hdr_have;
+            size_t take = (frame_len < need) ? frame_len : need;
+            memcpy(early_hdr + hdr_have, frame, take);
+            hdr_have += take;
+
+            /* Any remaining bytes in this frame are payload data */
+            if (frame_len > take) {
+                size_t rem = frame_len - take;
+                if (rem <= sizeof(extra) - extra_len) {
+                    memcpy(extra + extra_len, frame + take, rem);
+                    extra_len += rem;
+                }
+            }
+
+            /* Check magic once we have at least 5 bytes */
+            if (hdr_have >= 5 && !is_early) {
+                if (early_hdr[0] == 0xff && early_hdr[1] == 0xff &&
+                    early_hdr[2] == 0xff && early_hdr[3] == 'T' &&
+                    early_hdr[4] == 'S') {
+                    is_early = true;
+                    TSNODE_LOGI(TAG, "EarlyNoise magic detected");
+                } else {
+                    /* Not early payload — this is likely an HTTP/2 SETTINGS
+                     * frame or other post-handshake data.  We don't speak
+                     * HTTP/2, so just skip it. */
+                    TSNODE_LOGI(TAG, "non-EarlyNoise post-handshake frame "
+                                 "(%zu bytes), skipping", frame_len);
+                    break;
+                }
+            }
+        }
+
+        if (is_early && hdr_have == 9) {
+            /* Parse payload length from bytes 5-8 */
+            uint32_t ep_len = ((uint32_t)early_hdr[5] << 24) |
+                              ((uint32_t)early_hdr[6] << 16) |
+                              ((uint32_t)early_hdr[7] << 8)  |
+                              ((uint32_t)early_hdr[8]);
+            TSNODE_LOGI(TAG, "EarlyNoise payload: %u bytes", ep_len);
+
+            /* We already have extra_len bytes of the JSON payload.
+             * Drain more records until we've consumed ep_len bytes total. */
+            size_t consumed = extra_len;
+            while (consumed < ep_len) {
+                uint8_t skip[256];
+                size_t skip_len;
+                err = ts2021_record_recv(&s_conn, skip, sizeof(skip), &skip_len);
+                if (err != TSNODE_OK) break;
+                consumed += skip_len;
+            }
+            TSNODE_LOGI(TAG, "EarlyNoise skipped (%u bytes, consumed %zu)",
+                         ep_len, consumed);
+        }
+    }
+
     /* Step 7: Register with auth key */
     set_state(TSNODE_CLIENT_REGISTERING);
     char reg_buf[REGISTER_BUF_SIZE];
@@ -374,6 +465,8 @@ static tsnode_err_t do_connect(void)
         }
         TSNODE_LOGW(TAG, "frame too small (%zu bytes), skipping", reg_resp_len);
     }
+    reg_resp[reg_resp_len] = '\0';
+    TSNODE_LOGI(TAG, "RegisterResponse (%zu bytes): %s", reg_resp_len, (char *)reg_resp);
     reg_resp[reg_resp_len] = '\0';
 
     tsnode_register_response_t reg_result;
@@ -433,6 +526,7 @@ static tsnode_err_t do_connect(void)
         return err;
     }
     map_resp[map_resp_len] = '\0';
+    TSNODE_LOGI(TAG, "MapResponse (%zu bytes): %s", map_resp_len, (char *)map_resp);
 
     tsnode_map_netmap_t netmap;
     err = tsnode_map_parse_response(&netmap, (const char *)map_resp,
