@@ -190,3 +190,65 @@ void tsnode_blake2s(uint8_t *out, size_t outlen, const uint8_t *in,
     tsnode_blake2s_update(&ctx, in, inlen);
     tsnode_blake2s_final(&ctx, out, outlen);
 }
+
+/*
+ * Scrub a stack buffer without relying on platform helpers: this file is
+ * deliberately pure C11 (see header). Volatile defeats dead-store
+ * elimination for the scrub itself; it cannot defend against a swapping
+ * environment, which is out of scope on the ESP32 targets.
+ */
+static void blake2s_secure_zero(void *p, size_t n)
+{
+    volatile uint8_t *v = (volatile uint8_t *)p;
+    while (n--) {
+        *v++ = 0;
+    }
+}
+
+tsnode_err_t tsnode_blake2s_init_key(tsnode_blake2s_ctx *ctx, size_t outlen,
+                                     const uint8_t *key, size_t keylen)
+{
+    if (ctx == NULL || key == NULL || outlen == 0 ||
+        outlen > TSNODE_BLAKE2S_OUTBYTES || keylen == 0 ||
+        keylen > TSNODE_BLAKE2S_KEYBYTES) {
+        return TSNODE_ERR_INVALID_ARG;
+    }
+
+    memset(ctx, 0, sizeof(*ctx));
+    for (int i = 0; i < 8; i++) {
+        ctx->h[i] = blake2s_IV[i];
+    }
+    /* RFC 7693 parameter block: digest_length || key_length || fanout=1 ||
+     * depth=1. Keyed mode differs from unkeyed only in key_length != 0. */
+    ctx->h[0] ^= (uint32_t)outlen | ((uint32_t)keylen << 8) |
+                 (1u << 16) | (1u << 24);
+    ctx->outlen = outlen;
+
+    /* Absorb the zero-padded key as the first data block. With an empty
+     * message this stays buffered and is compressed by final() with the
+     * finalization flag — exactly the reference implementation behavior. */
+    uint8_t block[TSNODE_BLAKE2S_BLOCKBYTES] = {0};
+    memcpy(block, key, keylen);
+    tsnode_blake2s_update(ctx, block, TSNODE_BLAKE2S_BLOCKBYTES);
+    blake2s_secure_zero(block, sizeof(block));
+
+    return TSNODE_OK;
+}
+
+tsnode_err_t tsnode_blake2s_keyed(uint8_t *out, size_t outlen,
+                                  const uint8_t *key, size_t keylen,
+                                  const uint8_t *in, size_t inlen)
+{
+    if (out == NULL) {
+        return TSNODE_ERR_INVALID_ARG;
+    }
+    tsnode_blake2s_ctx ctx;
+    tsnode_err_t err = tsnode_blake2s_init_key(&ctx, outlen, key, keylen);
+    if (err != TSNODE_OK) {
+        return err;
+    }
+    tsnode_blake2s_update(&ctx, in, inlen);
+    tsnode_blake2s_final(&ctx, out, outlen);
+    blake2s_secure_zero(&ctx, sizeof(ctx));
+    return TSNODE_OK;
+}
