@@ -87,6 +87,7 @@ static void cmd_help(void)
         "  wifi set <ssid>       pide PSK sin echo, guarda y conecta\r\n"
         "  tskey set             pide auth key sin echo, valida prefijo\r\n"
         "  tsconnect             conecta a la tailnet (requiere wifi + tskey)\r\n"
+        "  tsforget              borra identidad persistida (nodo nuevo al reconectar)\r\n"
         "  status                estado tsnode + wi-fi + IP\r\n"
         "  provision status      que credenciales hay cargadas\r\n"
         "  provision wipe        borra credenciales provisionadas\r\n"
@@ -184,7 +185,8 @@ static void cmd_provision_status(void)
     console_write(line);
 }
 
-static void cmd_tsconnect(void)
+static void tsconnect_common(const char *host, uint16_t port,
+                             const char *control_key_hex)
 {
     if (!wifi_app_is_connected()) {
         console_write("error: wifi no conectada\r\n");
@@ -206,10 +208,11 @@ static void cmd_tsconnect(void)
              mac[3], mac[4], mac[5]);
 
     tsnode_client_config_t cfg = {
-        .control_host = "controlplane.tailscale.com",
-        .control_port = 80,
+        .control_host = host,
+        .control_port = port,
         .auth_key = auth_key,
         .hostname = hostname,
+        .control_key_hex = control_key_hex,
     };
     memset(cfg.machine_key_priv, 0, sizeof(cfg.machine_key_priv));
 
@@ -223,6 +226,25 @@ static void cmd_tsconnect(void)
         return;
     }
     console_write("cliente iniciado (ver logs)\r\n");
+}
+
+static void cmd_tsconnect(void)
+{
+    tsconnect_common("controlplane.tailscale.com", 80, NULL);
+}
+
+/* TEST-ONLY: contra el server Go local (goenv/) con upgrade HTTP.
+ * La auth key puede ser inválida: el stub solo loguea el request. */
+static void cmd_tsconnectlocal(void)
+{
+    tsconnect_common("<ip-lan>", 9999,
+                     "REDACTED-TEST-KEY");
+}
+
+static void cmd_tsforget(void)
+{
+    tsnode_client_forget_identity();
+    console_write("identidad borrada: proximo connect registra nodo nuevo\r\n");
 }
 
 static void dispatch(char *line)
@@ -241,6 +263,14 @@ static void dispatch(char *line)
     }
     if (strcmp(line, "tsconnect") == 0) {
         cmd_tsconnect();
+        return;
+    }
+    if (strcmp(line, "tsconnectlocal") == 0) {
+        cmd_tsconnectlocal();
+        return;
+    }
+    if (strcmp(line, "tsforget") == 0) {
+        cmd_tsforget();
         return;
     }
     if (strcmp(line, "status") == 0) {

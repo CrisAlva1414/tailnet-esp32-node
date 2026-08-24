@@ -34,23 +34,23 @@ static void bytes_to_hex(char *out, size_t out_cap, const uint8_t *in,
 
 tsnode_err_t tsnode_register_build_request(char *buf, size_t buf_size,
                                            size_t *out_len,
-                                           const uint8_t node_key[32],
-                                           const uint8_t machine_key[32],
+                                           const uint8_t node_key_pub[32],
                                            const char *auth_key,
                                            const char *hostname,
                                            uint32_t capability_version)
 {
     if (buf == NULL || buf_size == 0 || out_len == NULL ||
-        node_key == NULL || machine_key == NULL || auth_key == NULL) {
+        node_key_pub == NULL || auth_key == NULL) {
         return TSNODE_ERR_INVALID_ARG;
     }
 
-    char node_hex[65], mach_hex[65];
-    bytes_to_hex(node_hex, sizeof(node_hex), node_key, 32);
-    bytes_to_hex(mach_hex, sizeof(mach_hex), machine_key, 32);
+    char node_hex[65];
+    bytes_to_hex(node_hex, sizeof(node_hex), node_key_pub, 32);
 
     /* Build JSON manually — no dynamic allocation.
-     * Format matches tailcfg.RegisterRequest (verified from source). */
+     * Schema: tailcfg.RegisterRequest. La identidad de máquina la lleva el
+     * canal Noise (machine key del handshake); el JSON solo declara NodeKey
+     * pública + auth. */
     size_t pos = 0;
     int n;
 

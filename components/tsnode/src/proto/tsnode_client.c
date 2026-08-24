@@ -18,8 +18,72 @@
 #include "tsnode_register.h"
 #include "x25519_wrapper.h"
 #include "base64.h"
+#include "nvs.h"
 
 #define TAG "tsnode_client"
+
+/* Persistencia de identidad (ADR-0003): machine key + node key en NVS.
+ * Namespace propio del componente. En banco de pruebas sin flash encryption
+ * los blobs están en claro — aceptado solo para desarrollo (ver ADR-0003). */
+#define TS_ID_NVS_NAMESPACE "tsnode"
+static const char *TS_ID_KEY_MACH = "machkey";
+static const char *TS_ID_KEY_NODE = "nodekey";
+
+/* Carga la identidad persistida. Si solo uno de los dos blobs es válido,
+ * se descartan ambos para no mezclar identidades parciales. */
+static bool load_identity(uint8_t mach[32], uint8_t node[32])
+{
+    nvs_handle_t h;
+    if (nvs_open(TS_ID_NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    size_t len = 32;
+    bool ok_mach = nvs_get_blob(h, TS_ID_KEY_MACH, mach, &len) == ESP_OK &&
+                   len == 32;
+    len = 32;
+    bool ok_node = nvs_get_blob(h, TS_ID_KEY_NODE, node, &len) == ESP_OK &&
+                   len == 32;
+    nvs_close(h);
+    if (ok_mach != ok_node) {
+        memset(mach, 0, 32);
+        memset(node, 0, 32);
+        return false;
+    }
+    return ok_mach && ok_node && mach[0] != 0 && node[0] != 0;
+}
+
+static void save_identity(const uint8_t mach[32], const uint8_t node[32])
+{
+    nvs_handle_t h;
+    if (nvs_open(TS_ID_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        TSNODE_LOGW(TAG, "identity persist: nvs open failed");
+        return;
+    }
+    esp_err_t e1 = nvs_set_blob(h, TS_ID_KEY_MACH, mach, 32);
+    esp_err_t e2 = nvs_set_blob(h, TS_ID_KEY_NODE, node, 32);
+    esp_err_t ec = nvs_commit(h);
+    if (e1 != ESP_OK || e2 != ESP_OK || ec != ESP_OK) {
+        TSNODE_LOGW(TAG, "identity persist failed (%d %d %d)", e1, e2, ec);
+    } else {
+        TSNODE_LOGI(TAG, "identity persisted to NVS");
+    }
+    nvs_close(h);
+}
+
+void tsnode_client_forget_identity(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(TS_ID_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        TSNODE_LOGW(TAG, "forget identity: nvs open failed");
+        return;
+    }
+    (void)nvs_erase_key(h, TS_ID_KEY_MACH); /* NVS_ERR_NOT_FOUND es OK acá */
+    (void)nvs_erase_key(h, TS_ID_KEY_NODE);
+    if (nvs_commit(h) == ESP_OK) {
+        TSNODE_LOGI(TAG, "identity erased from NVS");
+    }
+    nvs_close(h);
+}
 
 #define CONTROL_KEY_BUF_SIZE 1024
 #define REGISTER_BUF_SIZE    1024
@@ -36,6 +100,12 @@ static tsnode_client_config_t s_config;
 static ts2021_conn_t s_conn;
 static uint8_t s_node_key[32];       /* WireGuard identity key (privada) */
 static uint8_t s_node_key_pub[32];   /* pública, para header ts-lb */
+
+/* Pushback para h2_io_recv: bytes ya extraídos del record layer que son
+ * del flujo HTTP/2 (SETTINGS del server cuando no hay EarlyNoise, u
+ * overshoot del drain de EarlyNoise). Estático, techo fijo (ADR-0009 D3). */
+static uint8_t s_h2_pushback[1024];
+static size_t s_h2_pushback_len;
 static h2_conn_t s_h2;
 
 /* Buffers grandes fuera del stack: la tarea corre con 40 KB y el pico de
@@ -53,6 +123,18 @@ static tsnode_err_t h2_io_send(void *ctx, const uint8_t *data, size_t len)
 static tsnode_err_t h2_io_recv(void *ctx, uint8_t *buf, size_t cap,
                                 size_t *out_len)
 {
+    /* Bytes rescatados por el bloque EarlyNoise (Step 6b): registros que ya
+     * salieron del record layer pero pertenecen al flujo HTTP/2. Se sirven
+     * antes que el transporte para no perderlos ni reordenarlos. */
+    if (s_h2_pushback_len > 0) {
+        size_t n = (s_h2_pushback_len < cap) ? s_h2_pushback_len : cap;
+        memcpy(buf, s_h2_pushback, n);
+        memmove(s_h2_pushback, s_h2_pushback + n, s_h2_pushback_len - n);
+        s_h2_pushback_len -= n;
+        *out_len = n;
+        return TSNODE_OK;
+    }
+
     /* Registros Noise de longitud cero son legales (padding del par):
      * se consumen acá para que h2 interprete 0 únicamente como EOF. */
     ts2021_conn_t *conn = (ts2021_conn_t *)ctx;
@@ -203,31 +285,66 @@ static tsnode_err_t do_connect(void)
 {
     tsnode_err_t err;
 
+    s_h2_pushback_len = 0;
+
     /* Step 1: Fetch control server public key */
     uint8_t control_key[32];
-    err = fetch_control_key(control_key);
-    if (err != TSNODE_OK) return err;
-
-    /* Step 2: Generate machine key if not provided */
-    bool need_gen = true;
-    for (int i = 0; i < 32; i++) {
-        if (s_config.machine_key_priv[i] != 0) {
-            need_gen = false;
-            break;
+    if (s_config.control_key_hex != NULL) {
+        /* TEST-ONLY: control key provista (server Go local). */
+        if (strlen(s_config.control_key_hex) != 64) {
+            return TSNODE_ERR_INVALID_ARG;
         }
+        for (int i = 0; i < 32; i++) {
+            char hi_c = s_config.control_key_hex[i * 2];
+            char lo_c = s_config.control_key_hex[i * 2 + 1];
+            int hi = (hi_c >= '0' && hi_c <= '9') ? hi_c - '0'
+                   : (hi_c >= 'a' && hi_c <= 'f') ? hi_c - 'a' + 10 : -1;
+            int lo = (lo_c >= '0' && lo_c <= '9') ? lo_c - '0'
+                   : (lo_c >= 'a' && lo_c <= 'f') ? lo_c - 'a' + 10 : -1;
+            if (hi < 0 || lo < 0) return TSNODE_ERR_INVALID_ARG;
+            control_key[i] = (uint8_t)((hi << 4) | lo);
+        }
+        TSNODE_LOGI(TAG, "control key from config (test mode)");
+    } else {
+        err = fetch_control_key(control_key);
+        if (err != TSNODE_OK) return err;
     }
-    if (need_gen) {
-        /* Use mbedTLS keygen which applies proper X25519 clamping internally */
-        uint8_t temp_pub[32];
-        if (tsnode_x25519_keygen(s_config.machine_key_priv, temp_pub) != 0) {
+
+    /* Step 2: identidad — NVS primero (ADR-0003); si no existe, generar y
+     * persistir. Con identidad persistida el nodo registrado es SIEMPRE el
+     * mismo: la aprobación de device sobrevive reinicios. */
+    uint8_t loaded_mach[32] = {0};
+    uint8_t loaded_node[32] = {0};
+    if (load_identity(loaded_mach, loaded_node)) {
+        memcpy(s_config.machine_key_priv, loaded_mach, 32);
+        memcpy(s_node_key, loaded_node, 32);
+        if (tsnode_x25519_publickey(s_node_key, s_node_key_pub) != 0) {
             return TSNODE_ERR_CRYPTO;
         }
-        TSNODE_LOGI(TAG, "generated new machine key");
-    }
+        TSNODE_LOGI(TAG, "identity loaded from NVS");
+    } else {
+        bool need_gen = true;
+        for (int i = 0; i < 32; i++) {
+            if (s_config.machine_key_priv[i] != 0) {
+                need_gen = false;
+                break;
+            }
+        }
+        if (need_gen) {
+            /* Use mbedTLS keygen which applies proper X25519 clamping internally */
+            uint8_t temp_pub[32];
+            if (tsnode_x25519_keygen(s_config.machine_key_priv, temp_pub) != 0) {
+                return TSNODE_ERR_CRYPTO;
+            }
+            TSNODE_LOGI(TAG, "generated new machine key");
+        }
 
-    /* Step 2b: Generate node key (WireGuard identity) from random */
-    if (tsnode_x25519_keygen(s_node_key, s_node_key_pub) != 0) {
-        return TSNODE_ERR_CRYPTO;
+        /* Step 2b: Generate node key (WireGuard identity) from random */
+        if (tsnode_x25519_keygen(s_node_key, s_node_key_pub) != 0) {
+            return TSNODE_ERR_CRYPTO;
+        }
+
+        save_identity(s_config.machine_key_priv, s_node_key);
     }
 
     /* Step 3: Generate Noise initiation before TCP connect */
@@ -388,7 +505,7 @@ static tsnode_err_t do_connect(void)
          * bytes beyond the header that arrived in the same record. */
         uint8_t early_hdr[9];
         size_t hdr_have = 0;
-        uint8_t extra[512];    /* bytes beyond the 9-byte header */
+        uint8_t extra[512] = {0}; /* bytes beyond the 9-byte header */
         size_t extra_len = 0;
         bool is_early = false;
 
@@ -426,11 +543,24 @@ static tsnode_err_t do_connect(void)
                     is_early = true;
                     TSNODE_LOGI(TAG, "EarlyNoise magic detected");
                 } else {
-                    /* Not early payload — this is likely an HTTP/2 SETTINGS
-                     * frame or other post-handshake data.  We don't speak
-                     * HTTP/2, so just skip it. */
+                    /* No es EarlyNoise: es el SETTINGS del server u otro
+                     * frame del flujo HTTP/2. Los bytes ya salieron del
+                     * record layer, así que van a pushback para que h2 los
+                     * consuma en orden — nunca se descartan (ADR-0009). */
+                    size_t hdr_bytes = (hdr_have < sizeof(early_hdr))
+                                           ? hdr_have : sizeof(early_hdr);
+                    size_t total = hdr_have + extra_len;
+                    if (total > sizeof(s_h2_pushback)) {
+                        TSNODE_LOGE(TAG, "pushback overflow");
+                        tsnode_port_socket_close(sock);
+                        return TSNODE_ERR_NO_MEMORY;
+                    }
+                    memcpy(s_h2_pushback, early_hdr, hdr_bytes);
+                    memcpy(s_h2_pushback + hdr_bytes, extra, extra_len);
+                    s_h2_pushback_len = total;
                     TSNODE_LOGI(TAG, "non-EarlyNoise post-handshake frame "
-                                 "(%zu bytes), skipping", frame_len);
+                                 "(%zu bytes): %zu bytes to h2 pushback",
+                                 frame_len, total);
                     break;
                 }
             }
@@ -445,13 +575,25 @@ static tsnode_err_t do_connect(void)
             TSNODE_LOGI(TAG, "EarlyNoise payload: %u bytes", ep_len);
 
             /* We already have extra_len bytes of the JSON payload.
-             * Drain more records until we've consumed ep_len bytes total. */
+             * Drain more records until we've consumed ep_len bytes total.
+             * Si un registro excede lo que falta, el sobrante es del flujo
+             * HTTP/2 y va a pushback — no se descarta. */
             size_t consumed = extra_len;
             while (consumed < ep_len) {
                 uint8_t skip[256];
                 size_t skip_len;
                 err = ts2021_record_recv(&s_conn, skip, sizeof(skip), &skip_len);
                 if (err != TSNODE_OK) break;
+                if (consumed + skip_len > ep_len) {
+                    size_t over = consumed + skip_len - ep_len;
+                    if (over <= sizeof(s_h2_pushback) - s_h2_pushback_len) {
+                        memcpy(s_h2_pushback + s_h2_pushback_len,
+                               skip + (skip_len - over), over);
+                        s_h2_pushback_len += over;
+                    }
+                    consumed = ep_len;
+                    break;
+                }
                 consumed += skip_len;
             }
             TSNODE_LOGI(TAG, "EarlyNoise skipped (%u bytes, consumed %zu)",
@@ -482,8 +624,7 @@ static tsnode_err_t do_connect(void)
     char reg_req[REGISTER_BUF_SIZE];
     size_t reg_len;
     err = tsnode_register_build_request(reg_req, sizeof(reg_req), &reg_len,
-                                         s_node_key,
-                                         s_config.machine_key_priv,
+                                         s_node_key_pub,
                                          s_config.auth_key,
                                          s_config.hostname,
                                          145); /* CurrentCapabilityVersion */
@@ -545,7 +686,7 @@ static tsnode_err_t do_connect(void)
     char map_req[MAP_REQUEST_BUF_SIZE];
     size_t map_req_len;
     err = tsnode_map_build_request(map_req, sizeof(map_req), &map_req_len,
-                                    s_node_key,
+                                    s_node_key_pub,
                                     zero_disco,
                                     s_config.hostname,
                                     145, false);
@@ -601,6 +742,10 @@ static void client_task(void *arg)
         TSNODE_LOGE(TAG, "connect failed: %s (%d)",
                     tsnode_err_name(err), err);
         set_state(TSNODE_CLIENT_ERROR);
+    } else {
+        /* Ciclo one-shot completo: marcar DONE para que un próximo
+         * start() sea válido (la tarea ya se va a borrar). */
+        set_state(TSNODE_CLIENT_DONE);
     }
 
     /* TODO: map polling loop, reconnection logic */
@@ -616,11 +761,44 @@ tsnode_err_t tsnode_client_start(const tsnode_client_config_t *config)
     if (config == NULL || config->auth_key == NULL) {
         return TSNODE_ERR_INVALID_ARG;
     }
-    if (s_state != TSNODE_CLIENT_IDLE && s_state != TSNODE_CLIENT_ERROR) {
+    if (s_state != TSNODE_CLIENT_IDLE && s_state != TSNODE_CLIENT_ERROR &&
+        s_state != TSNODE_CLIENT_DONE) {
         return TSNODE_ERR_INVALID_STATE;
     }
 
     memcpy(&s_config, config, sizeof(s_config));
+
+    /* Copiar los strings a storage propio: los punteros originales pueden
+     * apuntar al stack del caller, que se recicla cuando esta función
+     * retorna. Sin esta copia el JSON del register sale con memoria
+     * reutilizada (bug raíz del HTTP 500 en producción). */
+    static char ctrl_host[TSNODE_CLIENT_CTRLHOST_MAX];
+    static char auth_key_cp[TSNODE_CLIENT_AUTHKEY_MAX];
+    static char hostname_cp[TSNODE_CLIENT_HOSTNAME_MAX];
+    if (s_config.control_host != NULL) {
+        int n = snprintf(ctrl_host, sizeof(ctrl_host), "%s",
+                         s_config.control_host);
+        if (n < 0 || (size_t)n >= sizeof(ctrl_host)) {
+            return TSNODE_ERR_INVALID_ARG;
+        }
+        s_config.control_host = ctrl_host;
+    }
+    if (s_config.auth_key != NULL) {
+        int n = snprintf(auth_key_cp, sizeof(auth_key_cp), "%s",
+                         s_config.auth_key);
+        if (n < 0 || (size_t)n >= sizeof(auth_key_cp)) {
+            return TSNODE_ERR_INVALID_ARG;
+        }
+        s_config.auth_key = auth_key_cp;
+    }
+    if (s_config.hostname != NULL) {
+        int n = snprintf(hostname_cp, sizeof(hostname_cp), "%s",
+                         s_config.hostname);
+        if (n < 0 || (size_t)n >= sizeof(hostname_cp)) {
+            return TSNODE_ERR_INVALID_ARG;
+        }
+        s_config.hostname = hostname_cp;
+    }
 
     /* Default control plane */
     if (s_config.control_host == NULL) {

@@ -28,8 +28,16 @@ typedef enum {
     TSNODE_CLIENT_REGISTERING,
     TSNODE_CLIENT_MAP_SYNC,
     TSNODE_CLIENT_ONLINE,
+    /* Ciclo one-shot completado: la tarea se auto-borró. Permite reiniciar. */
+    TSNODE_CLIENT_DONE,
     TSNODE_CLIENT_ERROR,
 } tsnode_client_state_t;
+
+/* Límites de los strings que el cliente copia a storage propio en
+ * tsnode_client_start() — el caller puede usar stack sin riesgo. */
+#define TSNODE_CLIENT_HOSTNAME_MAX 64  /* 63 + NUL */
+#define TSNODE_CLIENT_AUTHKEY_MAX 128  /* igual a PROV_TSKEY_MAX_LEN */
+#define TSNODE_CLIENT_CTRLHOST_MAX 64
 
 /* Client configuration (set before starting) */
 typedef struct {
@@ -38,14 +46,25 @@ typedef struct {
     const char *auth_key;           /* tskey-auth-... */
     const char *hostname;           /* node hostname */
     uint8_t     machine_key_priv[32]; /* our machine key (or zeroed to generate) */
+    /* TEST-ONLY: si no NULL, salta el fetch de /key y usa esta hex de 64
+     * chars como control key (para apuntar al server Go local). */
+    const char *control_key_hex;
 } tsnode_client_config_t;
 
 /*
  * Start the Tailscale client task.
  * Requires: WiFi connected, auth_key provisioned.
- * config is copied internally; the caller can free it after this returns.
+ * El cliente COPIA el struct Y los strings (control_host, auth_key,
+ * hostname) a storage propio: los punteros del caller pueden ser stack.
  */
 tsnode_err_t tsnode_client_start(const tsnode_client_config_t *config);
+
+/*
+ * Erase the persisted identity (machine + node key) from NVS.
+ * The next client start generates a fresh identity, which registers
+ * as a NEW node (requires device approval again).
+ */
+void tsnode_client_forget_identity(void);
 
 /*
  * Stop the client and disconnect from tailnet.

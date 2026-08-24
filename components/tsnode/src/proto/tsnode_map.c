@@ -43,19 +43,19 @@ static int hex_to_bytes(uint8_t *out, size_t out_len, const char *hex,
 
 tsnode_err_t tsnode_map_build_request(char *buf, size_t buf_size,
                                       size_t *out_len,
-                                      const uint8_t node_key[32],
+                                      const uint8_t node_key_pub[32],
                                       const uint8_t disco_key[32],
                                       const char *hostname,
                                       uint32_t capability_version,
                                       bool stream)
 {
-    if (buf == NULL || buf_size == 0 || out_len == NULL || node_key == NULL) {
+    if (buf == NULL || buf_size == 0 || out_len == NULL || node_key_pub == NULL) {
         return TSNODE_ERR_INVALID_ARG;
     }
 
     char nk_hex[65], dk_hex[65];
     for (int i = 0; i < 32; i++) {
-        snprintf(nk_hex + i * 2, 3, "%02x", node_key[i]);
+        snprintf(nk_hex + i * 2, 3, "%02x", node_key_pub[i]);
         snprintf(dk_hex + i * 2, 3, "%02x", disco_key[i]);
     }
     nk_hex[64] = '\0';

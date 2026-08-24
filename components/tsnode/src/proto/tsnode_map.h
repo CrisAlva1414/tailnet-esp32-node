@@ -50,7 +50,7 @@ typedef struct {
  */
 tsnode_err_t tsnode_map_build_request(char *buf, size_t buf_size,
                                       size_t *out_len,
-                                      const uint8_t node_key[32],
+                                      const uint8_t node_key_pub[32],
                                       const uint8_t disco_key[32],
                                       const char *hostname,
                                       uint32_t capability_version,

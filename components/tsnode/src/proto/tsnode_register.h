@@ -28,13 +28,13 @@ typedef struct {
 
 /*
  * Build RegisterRequest JSON into buf.
+ * node_key_pub es la clave PÚBLICA WireGuard del nodo (32 bytes crudos).
  * Tailscale CapabilityVersion = 145 (verified from source).
  * Returns TSNODE_ERR_NO_MEMORY if buf is too small.
  */
 tsnode_err_t tsnode_register_build_request(char *buf, size_t buf_size,
                                            size_t *out_len,
-                                           const uint8_t node_key[32],
-                                           const uint8_t machine_key[32],
+                                           const uint8_t node_key_pub[32],
                                            const char *auth_key,
                                            const char *hostname,
                                            uint32_t capability_version);

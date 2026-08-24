@@ -16,5 +16,5 @@ idf_component_register(
          "src/proto/tsnode_client.c"
     INCLUDE_DIRS "include" "src/proto"
     PRIV_INCLUDE_DIRS "src" "src/port" "src/crypto"
-    REQUIRES esp_hw_support esp_timer mbedtls esp_netif
+    REQUIRES esp_hw_support esp_timer mbedtls esp_netif nvs_flash
 )
