@@ -10,12 +10,15 @@ idf_component_register(
          "src/port/esp_idf/x25519_wrapper.c"
          "src/crypto/blake2s.c"
          "src/crypto/base64.c"
+         "src/crypto/hmac_blake2s.c"
+         "src/wg/wg.c"
+         "src/wg/wg_crypto_mbedtls.c"
          "src/proto/ts2021.c"
          "src/proto/h2.c"
          "src/proto/tsnode_register.c"
          "src/proto/tsnode_map.c"
          "src/proto/tsnode_client.c"
     INCLUDE_DIRS "include" "src/proto"
-    PRIV_INCLUDE_DIRS "src" "src/port" "src/crypto"
+    PRIV_INCLUDE_DIRS "src" "src/port" "src/crypto" "src/wg"
     REQUIRES esp_hw_support esp_timer mbedtls esp_netif nvs_flash
 )

@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "blake2s.h"
+#include "hmac_blake2s.h"
 #include "mbedtls/platform.h"
 #include "mbedtls/platform_util.h"
 #include "mbedtls/chachapoly.h"
@@ -73,45 +74,6 @@ static void noise_mix_hash(noise_symmetric_t *s, const uint8_t *data,
     tsnode_blake2s_final(&ctx, s->h, 32);
 }
 
-/* ---- HMAC-BLAKE2s (RFC 2104 with BLAKE2s) ---- */
-
-static void hmac_blake2s(uint8_t out[32], const uint8_t *key, size_t keylen,
-                         const uint8_t *in, size_t inlen)
-{
-    uint8_t i_key_pad[64], o_key_pad[64];
-
-    /* Pad/truncate key to block size (64 bytes) */
-    memset(i_key_pad, 0x36, 64);
-    memset(o_key_pad, 0x5c, 64);
-    if (keylen <= 64) {
-        for (size_t i = 0; i < keylen; i++) {
-            i_key_pad[i] ^= key[i];
-            o_key_pad[i] ^= key[i];
-        }
-    } else {
-        uint8_t k_hash[32];
-        tsnode_blake2s(k_hash, 32, key, keylen);
-        for (size_t i = 0; i < 32; i++) {
-            i_key_pad[i] ^= k_hash[i];
-            o_key_pad[i] ^= k_hash[i];
-        }
-    }
-
-    /* Inner hash: H(i_key_pad || in) */
-    uint8_t inner[32];
-    tsnode_blake2s_ctx ctx;
-    tsnode_blake2s_init(&ctx, 32);
-    tsnode_blake2s_update(&ctx, i_key_pad, 64);
-    tsnode_blake2s_update(&ctx, in, inlen);
-    tsnode_blake2s_final(&ctx, inner, 32);
-
-    /* Outer hash: H(o_key_pad || inner) */
-    tsnode_blake2s_init(&ctx, 32);
-    tsnode_blake2s_update(&ctx, o_key_pad, 64);
-    tsnode_blake2s_update(&ctx, inner, 32);
-    tsnode_blake2s_final(&ctx, out, 32);
-}
-
 /* ---- HKDF-BLAKE2s per Noise spec ----
  *
  * Noise MixKey expects:
@@ -120,111 +82,22 @@ static void hmac_blake2s(uint8_t out[32], const uint8_t *key, size_t keylen,
  *     ck' = first 32 bytes (new chaining key)
  *     k   = next 32 bytes (AEAD key for next message)
  *
- * This is equivalent to:
- *   prk = HMAC-BLAKE2s(salt=ck, ikm=shared)   [extract]
- *   out = HKDF-Expand(prk, info=nil, L=64)     [expand]
- *   new_ck = out[0..31], key = out[32..63]
- *
  * For Split():
  *   (k1, k2) = HKDF-Expand(prk=ck, info=nil, L=64)
  *   k1 = tx key, k2 = rx key
+ *
+ * HMAC/HKDF primitives live in crypto/hmac_blake2s.c (shared with wg.c,
+ * verified against wireguard-go device/noise-helpers.go @ master).
  */
 static void noise_key_derive(uint8_t new_ck[32], uint8_t key[32],
                              const uint8_t ikm[32], const uint8_t salt[32])
 {
-    /* HKDF-Extract: prk = HMAC-BLAKE2s(salt, ikm) */
-    uint8_t prk[32];
-    hmac_blake2s(prk, salt, 32, ikm, 32);
-
-    /* HKDF-Expand: output 64 bytes from prk with info=nil
-     * T(1) = HMAC-BLAKE2s(prk, 0x01)
-     * T(2) = HMAC-BLAKE2s(prk, T(1) || 0x02) */
-    uint8_t block_o[64], block_i[64];
-    memset(block_o, 0x5c, 64);
-    memset(block_i, 0x36, 64);
-    for (int i = 0; i < 32; i++) {
-        block_o[i] ^= prk[i];
-        block_i[i] ^= prk[i];
-    }
-
-    uint8_t t1[32], inner[32];
-    tsnode_blake2s_ctx ctx;
-
-    /* Inner hash: H(i_key_pad) — the inner pad is constant */
-    tsnode_blake2s_init(&ctx, 32);
-    tsnode_blake2s_update(&ctx, block_i, 64);
-    tsnode_blake2s_final(&ctx, inner, 32);
-
-    /* T(1) = H(o_key_pad || H(i_key_pad || 0x01)) */
-    uint8_t counter = 0x01;
-    tsnode_blake2s_init(&ctx, 32);
-    tsnode_blake2s_update(&ctx, block_i, 64);
-    tsnode_blake2s_update(&ctx, &counter, 1);
-    tsnode_blake2s_final(&ctx, inner, 32);
-    tsnode_blake2s_init(&ctx, 32);
-    tsnode_blake2s_update(&ctx, block_o, 64);
-    tsnode_blake2s_update(&ctx, inner, 32);
-    tsnode_blake2s_final(&ctx, t1, 32);
-
-    /* T(2) = H(o_key_pad || H(i_key_pad || T(1) || 0x02)) */
-    counter = 0x02;
-    tsnode_blake2s_init(&ctx, 32);
-    tsnode_blake2s_update(&ctx, block_i, 64);
-    tsnode_blake2s_update(&ctx, t1, 32);
-    tsnode_blake2s_update(&ctx, &counter, 1);
-    tsnode_blake2s_final(&ctx, inner, 32);
-    tsnode_blake2s_init(&ctx, 32);
-    tsnode_blake2s_update(&ctx, block_o, 64);
-    tsnode_blake2s_update(&ctx, inner, 32);
-    tsnode_blake2s_final(&ctx, key, 32);
-
-    memcpy(new_ck, t1, 32);
-    mbedtls_platform_zeroize(prk, sizeof(prk));
-    mbedtls_platform_zeroize(t1, sizeof(t1));
-    mbedtls_platform_zeroize(block_o, sizeof(block_o));
-    mbedtls_platform_zeroize(block_i, sizeof(block_i));
+    tsnode_hkdf_blake2s_2(new_ck, key, salt, ikm, 32);
 }
 
 static void noise_split(uint8_t c1[32], uint8_t c2[32], const uint8_t ck[32])
 {
-    /* HKDF-Extract(salt=ck, IKM=nil) -> prk */
-    uint8_t prk[32];
-    hmac_blake2s(prk, ck, 32, (const uint8_t *)"", 0);
-
-    /* HKDF-Expand(prk, info=nil, L=64) -> c1 || c2 */
-    uint8_t block_o[64], block_i[64];
-    memset(block_o, 0x5c, 64);
-    memset(block_i, 0x36, 64);
-    for (int i = 0; i < 32; i++) {
-        block_o[i] ^= prk[i];
-        block_i[i] ^= prk[i];
-    }
-
-    uint8_t inner[32];
-    tsnode_blake2s_ctx ctx;
-
-    /* T(1) */
-    uint8_t counter = 0x01;
-    tsnode_blake2s_init(&ctx, 32);
-    tsnode_blake2s_update(&ctx, block_i, 64);
-    tsnode_blake2s_update(&ctx, &counter, 1);
-    tsnode_blake2s_final(&ctx, inner, 32);
-    tsnode_blake2s_init(&ctx, 32);
-    tsnode_blake2s_update(&ctx, block_o, 64);
-    tsnode_blake2s_update(&ctx, inner, 32);
-    tsnode_blake2s_final(&ctx, c1, 32);
-
-    /* T(2) */
-    counter = 0x02;
-    tsnode_blake2s_init(&ctx, 32);
-    tsnode_blake2s_update(&ctx, block_i, 64);
-    tsnode_blake2s_update(&ctx, c1, 32);
-    tsnode_blake2s_update(&ctx, &counter, 1);
-    tsnode_blake2s_final(&ctx, inner, 32);
-    tsnode_blake2s_init(&ctx, 32);
-    tsnode_blake2s_update(&ctx, block_o, 64);
-    tsnode_blake2s_update(&ctx, inner, 32);
-    tsnode_blake2s_final(&ctx, c2, 32);
+    tsnode_hkdf_blake2s_2(c1, c2, ck, NULL, 0);
 }
 
 /* ---- AEAD with zero nonce (single-use, handshake only) ---- */

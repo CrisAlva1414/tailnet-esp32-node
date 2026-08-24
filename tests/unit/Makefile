@@ -8,7 +8,7 @@ CRYPTO = $(TSNODE)/src/crypto
 WG = $(TSNODE)/src/wg
 VECTORS = protocol_vectors
 
-TESTS = test_h2 test_blake2s test_replay
+TESTS = test_h2 test_blake2s test_replay test_wg
 
 all: $(TESTS)
 
@@ -25,10 +25,38 @@ test_blake2s: test_blake2s.c $(CRYPTO)/blake2s.c $(CRYPTO)/blake2s.h \
 test_replay: test_replay.c $(WG)/replay.c $(WG)/replay.h
 	$(CC) $(CFLAGS) -I$(WG) -o $@ $< $(WG)/replay.c
 
+# POLY1305_32BIT fija la variante portable de poly1305-donna: la
+# autodetección usaría unsigned __int128 (extensión GNU) que rompe
+# -Wpedantic. TweetNaCl + chacha20poly1305 son test-only (producción =
+# mbedTLS), ver vendor/README.
+#
+# TweetNaCl se compila aparte sin -Werror: código vendor upstream con
+# sign-compare benignos en su macro FOR; no se parchea código de
+# terceros para silenciar linters (política en vendor/README.md).
+VENDORTW = vendor/tweetnacl.host.o
+
+$(VENDORTW): vendor/tweetnacl.c vendor/tweetnacl.h
+	$(CC) -std=c11 -Wall -Wextra -Wpedantic \
+		-DPOLY1305_32BIT=1 -Ivendor -c $< -o $@
+
+test_wg: test_wg.c $(WG)/wg.c $(WG)/wg.h $(WG)/replay.c \
+	$(CRYPTO)/blake2s.c $(CRYPTO)/hmac_blake2s.c $(VECTORS)/wg_vectors.h \
+	$(VENDORTW) vendor/poly1305-donna.c \
+	vendor/poly1305-donna.h vendor/poly1305-donna-32.h \
+	vendor/chacha20poly1305_rfc8439.c vendor/wg_crypto_host.c
+	$(CC) $(CFLAGS) -DPOLY1305_32BIT=1 -I$(TSNODE) -I$(TSNODE)/include \
+		-o $@ $< \
+		$(WG)/wg.c $(WG)/replay.c $(CRYPTO)/blake2s.c \
+		$(CRYPTO)/hmac_blake2s.c \
+		vendor/poly1305-donna.c \
+		vendor/chacha20poly1305_rfc8439.c vendor/wg_crypto_host.c \
+		$(VENDORTW)
+
 check: all
 	./test_h2
 	./test_blake2s
 	./test_replay
+	./test_wg
 
 clean:
 	rm -f $(TESTS)

@@ -29,6 +29,9 @@ typedef enum {
     TSNODE_ERR_NETWORK,
     TSNODE_ERR_PROVISIONING,
     TSNODE_ERR_NOT_IMPLEMENTED,
+    /* WireGuard data plane: paquete autenticado correctamente pero con
+     * contador duplicado/fuera de ventana (drop silencioso por spec). */
+    TSNODE_ERR_REPLAY,
 } tsnode_err_t;
 
 /*
