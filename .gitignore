@@ -26,6 +26,9 @@ coredump*
 
 # Binarios de tests host
 tests/unit/test_h2
+tests/unit/test_blake2s
+tests/unit/test_wg
+tests/interop/wg_interop
 
 # Sistema
 .DS_Store
