@@ -120,6 +120,22 @@ tsnode_err_t tsnode_port_socket_read(tsnode_port_socket_t *sock,
  */
 void tsnode_port_socket_close(tsnode_port_socket_t *sock);
 
+/*
+ * Almacenamiento persistente clave-valor de blobs binarios (ADR-0003:
+ * identidad del nodo en NVS cifrada cuando corresponda). El core define
+ * namespace y claves; el port elige el backend (NVS en ESP-IDF).
+ *
+ * tsnode_port_kv_get: copia len bytes a out; false si la clave no existe,
+ * el tamaño no coincide exactamente o falla el backend.
+ * tsnode_port_kv_set: persiste len bytes; true solo si quedó commiteado.
+ * tsnode_port_kv_del: best-effort; borrar lo inexistente no es error.
+ */
+bool tsnode_port_kv_get(const char *ns, const char *key, uint8_t *out,
+                        size_t len);
+bool tsnode_port_kv_set(const char *ns, const char *key, const uint8_t *val,
+                        size_t len);
+void tsnode_port_kv_del(const char *ns, const char *key);
+
 #ifdef __cplusplus
 }
 #endif

@@ -18,13 +18,12 @@
 #include "tsnode_register.h"
 #include "x25519_wrapper.h"
 #include "base64.h"
-#include "nvs.h"
 
 #define TAG "tsnode_client"
 
-/* Persistencia de identidad (ADR-0003): machine key + node key en NVS.
- * Namespace propio del componente. En banco de pruebas sin flash encryption
- * los blobs están en claro — aceptado solo para desarrollo (ver ADR-0003). */
+/* Persistencia de identidad (ADR-0003): machine key + node key vía el KV
+ * del port (NVS en ESP-IDF). En banco de pruebas sin flash encryption los
+ * blobs están en claro — aceptado solo para desarrollo (ADR-0003). */
 #define TS_ID_NVS_NAMESPACE "tsnode"
 static const char *TS_ID_KEY_MACH = "machkey";
 static const char *TS_ID_KEY_NODE = "nodekey";
@@ -33,17 +32,10 @@ static const char *TS_ID_KEY_NODE = "nodekey";
  * se descartan ambos para no mezclar identidades parciales. */
 static bool load_identity(uint8_t mach[32], uint8_t node[32])
 {
-    nvs_handle_t h;
-    if (nvs_open(TS_ID_NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
-        return false;
-    }
-    size_t len = 32;
-    bool ok_mach = nvs_get_blob(h, TS_ID_KEY_MACH, mach, &len) == ESP_OK &&
-                   len == 32;
-    len = 32;
-    bool ok_node = nvs_get_blob(h, TS_ID_KEY_NODE, node, &len) == ESP_OK &&
-                   len == 32;
-    nvs_close(h);
+    bool ok_mach = tsnode_port_kv_get(TS_ID_NVS_NAMESPACE, TS_ID_KEY_MACH,
+                                      mach, 32);
+    bool ok_node = tsnode_port_kv_get(TS_ID_NVS_NAMESPACE, TS_ID_KEY_NODE,
+                                      node, 32);
     if (ok_mach != ok_node) {
         memset(mach, 0, 32);
         memset(node, 0, 32);
@@ -54,35 +46,22 @@ static bool load_identity(uint8_t mach[32], uint8_t node[32])
 
 static void save_identity(const uint8_t mach[32], const uint8_t node[32])
 {
-    nvs_handle_t h;
-    if (nvs_open(TS_ID_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
-        TSNODE_LOGW(TAG, "identity persist: nvs open failed");
-        return;
-    }
-    esp_err_t e1 = nvs_set_blob(h, TS_ID_KEY_MACH, mach, 32);
-    esp_err_t e2 = nvs_set_blob(h, TS_ID_KEY_NODE, node, 32);
-    esp_err_t ec = nvs_commit(h);
-    if (e1 != ESP_OK || e2 != ESP_OK || ec != ESP_OK) {
-        TSNODE_LOGW(TAG, "identity persist failed (%d %d %d)", e1, e2, ec);
+    bool ok_mach = tsnode_port_kv_set(TS_ID_NVS_NAMESPACE, TS_ID_KEY_MACH,
+                                      mach, 32);
+    bool ok_node = tsnode_port_kv_set(TS_ID_NVS_NAMESPACE, TS_ID_KEY_NODE,
+                                      node, 32);
+    if (!ok_mach || !ok_node) {
+        TSNODE_LOGW(TAG, "identity persist failed");
     } else {
         TSNODE_LOGI(TAG, "identity persisted to NVS");
     }
-    nvs_close(h);
 }
 
 void tsnode_client_forget_identity(void)
 {
-    nvs_handle_t h;
-    if (nvs_open(TS_ID_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
-        TSNODE_LOGW(TAG, "forget identity: nvs open failed");
-        return;
-    }
-    (void)nvs_erase_key(h, TS_ID_KEY_MACH); /* NVS_ERR_NOT_FOUND es OK acá */
-    (void)nvs_erase_key(h, TS_ID_KEY_NODE);
-    if (nvs_commit(h) == ESP_OK) {
-        TSNODE_LOGI(TAG, "identity erased from NVS");
-    }
-    nvs_close(h);
+    tsnode_port_kv_del(TS_ID_NVS_NAMESPACE, TS_ID_KEY_MACH);
+    tsnode_port_kv_del(TS_ID_NVS_NAMESPACE, TS_ID_KEY_NODE);
+    TSNODE_LOGI(TAG, "identity erased from NVS");
 }
 
 #define CONTROL_KEY_BUF_SIZE 1024

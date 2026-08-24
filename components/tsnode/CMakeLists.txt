@@ -6,6 +6,7 @@ idf_component_register(
     SRCS "src/tsnode.c"
          "src/port/esp_idf/tsnode_port_esp_idf.c"
          "src/port/esp_idf/tsnode_port_net_esp_idf.c"
+         "src/port/esp_idf/tsnode_port_kv_esp_idf.c"
          "src/port/esp_idf/x25519_wrapper.c"
          "src/crypto/blake2s.c"
          "src/crypto/base64.c"
