@@ -64,7 +64,20 @@ tsnode_err_t tsnode_map_build_request(char *buf, size_t buf_size,
  * MapResponse can be large; json_len may be the full response.
  */
 tsnode_err_t tsnode_map_parse_response(tsnode_map_netmap_t *netmap,
-                                       const char *json, size_t json_len);
+                                        const char *json, size_t json_len);
+
+/*
+ * Parsea el framing de tsp sobre /machine/map: [u32 LE length][payload]
+ * (control/tsp/map.go). Sin "Compress" en nuestro MapRequest el payload es
+ * JSON crudo; si llega con firma zstd retornamos TSNODE_ERR_NOT_IMPLEMENTED
+ * (sería bug nuestro haber pedido compresión — ADR-0009 D2).
+ *
+ * json_out apunta DENTRO de wire (sin copia). Validación fail-closed:
+ * length declarado debe coincidir exactamente con wire_len - 4.
+ */
+tsnode_err_t tsnode_map_parse_framed(const uint8_t *wire, size_t wire_len,
+                                      const uint8_t **json_out,
+                                      size_t *json_len_out);
 
 #ifdef __cplusplus
 }

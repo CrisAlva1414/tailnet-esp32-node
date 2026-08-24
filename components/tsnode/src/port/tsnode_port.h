@@ -46,6 +46,12 @@ tsnode_err_t tsnode_port_task_create(tsnode_port_task_fn fn, void *arg,
                                      const char *name, size_t stack_bytes,
                                      int priority);
 
+/*
+ * Autodestruye la tarea llamante. No retorna: la tarea termina aquí.
+ * El core no puede llamar vTaskDelete() directamente (ADR-0006).
+ */
+void tsnode_port_task_delete_self(void);
+
 /* --- Logging (ADR-0006: sin headers de plataforma en core) --- */
 
 /* Log callback registrado por la app. level: 0=error, 1=warn, 2=info, 3=debug */

@@ -19,17 +19,6 @@
 
 #define TAG "tsnode_reg"
 
-/* ---- Minimal JSON builder (no heap allocation) ---- */
-
-/* Append "key": "value" to a buffer. Returns bytes written or -1. */
-static int json_append_kv_str(char *buf, size_t cap, size_t pos,
-                               const char *key, const char *value)
-{
-    int n = snprintf(buf + pos, cap - pos, "\"%s\":\"%s\"", key, value);
-    if (n < 0 || (size_t)n >= cap - pos) return -1;
-    return n;
-}
-
 /* ---- Hex encoding for key bytes ---- */
 
 static void bytes_to_hex(char *out, size_t out_cap, const uint8_t *in,
@@ -85,11 +74,17 @@ tsnode_err_t tsnode_register_build_request(char *buf, size_t buf_size,
     if (n < 0 || (size_t)n >= buf_size - pos) return TSNODE_ERR_NO_MEMORY;
     pos += n;
 
+    /* Hostinfo anidado (tailcfg.Hostinfo): RegisterRequest no tiene un campo
+     * Hostname de nivel superior — el hostname va en Hostinfo.Hostname y el
+     * OS en Hostinfo.OS ("linux", igual que tailscaled; validado contra
+     * producción con el probe h2, sesión 2026-08-23). */
     if (hostname != NULL && hostname[0] != '\0') {
         buf[pos++] = ',';
-        n = json_append_kv_str(buf, buf_size, pos, "Hostname", hostname);
-        if (n < 0) return TSNODE_ERR_NO_MEMORY;
-        pos += (size_t)n;
+        n = snprintf(buf + pos, buf_size - pos,
+                     "\"Hostinfo\":{\"OS\":\"linux\",\"Hostname\":\"%s\"}",
+                     hostname);
+        if (n < 0 || (size_t)n >= buf_size - pos) return TSNODE_ERR_NO_MEMORY;
+        pos += n;
     }
 
     buf[pos++] = '}';

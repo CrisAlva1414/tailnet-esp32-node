@@ -3,18 +3,18 @@
  *
  * Minimal parser — extracts only what the ESP32 data plane needs.
  * No heap allocation. Scans JSON linearly for known field patterns.
+ *
+ * C puro: sin headers de plataforma (ADR-0006). Sin logging: el caller
+ * agrega contexto con los resultados parseados (los JSON de respuesta
+ * pueden contener datos de la tailnet que no deben ir a log por defecto).
  */
 
 #include "tsnode_map.h"
 
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-
-#include "ts2021.h"
-#include "tsnode_port.h"
-
-#define TAG "tsnode_map"
 
 /* ---- Hex decoding ---- */
 
@@ -103,6 +103,44 @@ tsnode_err_t tsnode_map_build_request(char *buf, size_t buf_size,
     return TSNODE_OK;
 }
 
+/* ---- MapResponse framing (control/tsp/map.go) ---- */
+
+/* Firma de frames zstd: pedimos JSON crudo (sin Compress), verlo acá
+ * significa que el par violó lo acordado o que cambió el protocolo. */
+static const uint8_t ZSTD_MAGIC[4] = {0x28, 0xB5, 0x2F, 0xFD};
+
+tsnode_err_t tsnode_map_parse_framed(const uint8_t *wire, size_t wire_len,
+                                      const uint8_t **json_out,
+                                      size_t *json_len_out)
+{
+    if (wire == NULL || json_out == NULL || json_len_out == NULL) {
+        return TSNODE_ERR_INVALID_ARG;
+    }
+    if (wire_len < 4) {
+        return TSNODE_ERR_NETWORK;
+    }
+
+    uint32_t declared = (uint32_t)wire[0] |
+                        ((uint32_t)wire[1] << 8) |
+                        ((uint32_t)wire[2] << 16) |
+                        ((uint32_t)wire[3] << 24);
+
+    /* Input hostil por defecto: el length declarado nunca se usa para
+     * indexar; solo se valida contra el tamaño real recibido. */
+    if ((size_t)declared != wire_len - 4) {
+        return TSNODE_ERR_NETWORK;
+    }
+
+    if (declared >= sizeof(ZSTD_MAGIC) &&
+        memcmp(wire + 4, ZSTD_MAGIC, sizeof(ZSTD_MAGIC)) == 0) {
+        return TSNODE_ERR_NOT_IMPLEMENTED;
+    }
+
+    *json_out = wire + 4;
+    *json_len_out = declared;
+    return TSNODE_OK;
+}
+
 /* ---- MapResponse parser ---- */
 
 /* Find a string value for a JSON key. Returns pointer past closing quote,
@@ -151,11 +189,14 @@ static const char *find_next_node_key(const char *search_from,
 }
 
 tsnode_err_t tsnode_map_parse_response(tsnode_map_netmap_t *netmap,
-                                       const char *json, size_t json_len)
+                                        const char *json, size_t json_len)
 {
-    if (netmap == NULL || json == NULL) {
+    if (netmap == NULL || json == NULL || json_len == 0) {
         return TSNODE_ERR_INVALID_ARG;
     }
+    /* El escaneo usa strstr/strchr: exige buffer NUL-terminado (el caller
+     * garantiza espacio para el NUL al pedir la respuesta a h2). json_len
+     * valida no-vacío acá; los límites reales los pone el NUL. */
 
     memset(netmap, 0, sizeof(*netmap));
 
@@ -246,7 +287,5 @@ tsnode_err_t tsnode_map_parse_response(tsnode_map_netmap_t *netmap,
         }
     }
 
-    TSNODE_LOGI(TAG, "parsed netmap: %u peers, self=%s",
-                netmap->peer_count, netmap->self_ip);
     return TSNODE_OK;
 }

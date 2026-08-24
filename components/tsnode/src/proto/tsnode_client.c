@@ -12,26 +12,64 @@
 #include <string.h>
 
 #include "ts2021.h"
+#include "h2.h"
 #include "tsnode_map.h"
 #include "tsnode_port.h"
 #include "tsnode_register.h"
 #include "x25519_wrapper.h"
 #include "base64.h"
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
 #define TAG "tsnode_client"
 
 #define CONTROL_KEY_BUF_SIZE 1024
 #define REGISTER_BUF_SIZE    1024
+/* Respuestas HTTP/2 completas (headers h2 ya removidos). RegisterResponse
+ * ronda 600 B; 4 KiB es margen holgado (ADR-0009 D3). */
+#define REGISTER_RESPONSE_BUF_SIZE 4096
 #define MAP_REQUEST_BUF_SIZE 1024
-#define MAP_RESPONSE_BUF_SIZE 8192
+/* MapResponse observado ~17 KB con tailnet chica; 32 KiB estático cubre
+ * crecimiento moderado de peers sin heap (ADR-0009 D3). */
+#define MAP_RESPONSE_BUF_SIZE 32768
 
 static tsnode_client_state_t s_state = TSNODE_CLIENT_IDLE;
 static tsnode_client_config_t s_config;
 static ts2021_conn_t s_conn;
-static uint8_t s_node_key[32];  /* WireGuard identity key */
+static uint8_t s_node_key[32];       /* WireGuard identity key (privada) */
+static uint8_t s_node_key_pub[32];   /* pública, para header ts-lb */
+static h2_conn_t s_h2;
+
+/* Buffers grandes fuera del stack: la tarea corre con 40 KB y el pico de
+ * crypto (mbedTLS) ya usa buena parte; 32 KB en stack es crash seguro. */
+static uint8_t s_reg_resp[REGISTER_RESPONSE_BUF_SIZE];
+static uint8_t s_map_resp[MAP_RESPONSE_BUF_SIZE];
+
+/* ---- I/O callbacks para h2 sobre la capa de registros ts2021 ---- */
+
+static tsnode_err_t h2_io_send(void *ctx, const uint8_t *data, size_t len)
+{
+    return ts2021_record_send((ts2021_conn_t *)ctx, data, len);
+}
+
+static tsnode_err_t h2_io_recv(void *ctx, uint8_t *buf, size_t cap,
+                                size_t *out_len)
+{
+    /* Registros Noise de longitud cero son legales (padding del par):
+     * se consumen acá para que h2 interprete 0 únicamente como EOF. */
+    ts2021_conn_t *conn = (ts2021_conn_t *)ctx;
+    do {
+        tsnode_err_t err = ts2021_record_recv(conn, buf, cap, out_len);
+        if (err != TSNODE_OK) return err;
+    } while (*out_len == 0);
+    return TSNODE_OK;
+}
+
+static void bytes_to_hex_str(char out[65], const uint8_t in[32])
+{
+    for (int i = 0; i < 32; i++) {
+        snprintf(out + i * 2, 3, "%02x", in[i]);
+    }
+    out[64] = '\0';
+}
 
 /* ---- State management ---- */
 
@@ -188,8 +226,7 @@ static tsnode_err_t do_connect(void)
     }
 
     /* Step 2b: Generate node key (WireGuard identity) from random */
-    uint8_t node_key_pub_tmp[32];
-    if (tsnode_x25519_keygen(s_node_key, node_key_pub_tmp) != 0) {
+    if (tsnode_x25519_keygen(s_node_key, s_node_key_pub) != 0) {
         return TSNODE_ERR_CRYPTO;
     }
 
@@ -422,11 +459,29 @@ static tsnode_err_t do_connect(void)
         }
     }
 
-    /* Step 7: Register with auth key */
+    /* Step 7: HTTP/2 sobre el túnel Noise (ADR-0009).
+     * Sin esta capa el server descarta la conexión con "bogus greeting":
+     * verificado empíricamente contra controlplane.tailscale.com
+     * (sesión 2026-08-23). El SETTINGS del server ya puede estar prebuffered;
+     * h2_client_start lo consume del record layer. */
+    h2_io_t h2io = {
+        .ctx = &s_conn,
+        .send_bytes = h2_io_send,
+        .recv_record = h2_io_recv,
+    };
+    err = h2_client_start(&s_h2, &h2io);
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "http2 start failed: %d", err);
+        return err;
+    }
+    TSNODE_LOGI(TAG, "http2 over noise OK");
+
+    /* Step 8: Register via POST /machine/register (h2). El header Ts-Lb
+     * lleva nuestra node key pública (control/tsp/register.go). */
     set_state(TSNODE_CLIENT_REGISTERING);
-    char reg_buf[REGISTER_BUF_SIZE];
+    char reg_req[REGISTER_BUF_SIZE];
     size_t reg_len;
-    err = tsnode_register_build_request(reg_buf, sizeof(reg_buf), &reg_len,
+    err = tsnode_register_build_request(reg_req, sizeof(reg_req), &reg_len,
                                          s_node_key,
                                          s_config.machine_key_priv,
                                          s_config.auth_key,
@@ -437,41 +492,26 @@ static tsnode_err_t do_connect(void)
         return err;
     }
 
-    /* Send RegisterRequest over record layer */
-    TSNODE_LOGI(TAG, "sending RegisterRequest (%zu bytes)", reg_len);
-    err = ts2021_record_send(&s_conn, (const uint8_t *)reg_buf, reg_len);
+    char node_key_hex[65];
+    bytes_to_hex_str(node_key_hex, s_node_key_pub);
+    char lb_value[8 + 64 + 1]; /* "nodekey:" + hex + NUL */
+    snprintf(lb_value, sizeof(lb_value), "nodekey:%s", node_key_hex);
+
+    size_t reg_resp_len;
+    err = h2_post(&s_h2, s_config.control_host, "/machine/register",
+                  lb_value, (const uint8_t *)reg_req, reg_len,
+                  s_reg_resp, sizeof(s_reg_resp) - 1, &reg_resp_len);
     if (err != TSNODE_OK) {
-        TSNODE_LOGE(TAG, "send RegisterRequest failed: %d", err);
+        TSNODE_LOGE(TAG, "register POST failed: %d", err);
         return err;
     }
-    TSNODE_LOGI(TAG, "RegisterRequest sent OK");
-
-    /* Receive RegisterResponse — skip prebuffered server frames that
-     * arrived before our RegisterRequest.  Valid RegisterResponse JSON
-     * is at least ~50 bytes; smaller frames are post-handshake noise. */
-    uint8_t reg_resp[2048];
-    size_t reg_resp_len;
-    TSNODE_LOGI(TAG, "waiting for RegisterResponse...");
-    for (int attempt = 0; attempt < 10; attempt++) {
-        err = ts2021_record_recv(&s_conn, reg_resp, sizeof(reg_resp),
-                                  &reg_resp_len);
-        if (err != TSNODE_OK) {
-            TSNODE_LOGE(TAG, "recv RegisterResponse failed: %d", err);
-            return err;
-        }
-        TSNODE_LOGI(TAG, "recv frame #%d: %zu bytes plaintext", attempt, reg_resp_len);
-        if (reg_resp_len >= 20) {
-            break;  /* Likely a real RegisterResponse */
-        }
-        TSNODE_LOGW(TAG, "frame too small (%zu bytes), skipping", reg_resp_len);
-    }
-    reg_resp[reg_resp_len] = '\0';
-    TSNODE_LOGI(TAG, "RegisterResponse (%zu bytes): %s", reg_resp_len, (char *)reg_resp);
-    reg_resp[reg_resp_len] = '\0';
+    /* -1 arriba garantiza lugar para el NUL que exige el parser. */
+    s_reg_resp[reg_resp_len] = '\0';
+    TSNODE_LOGI(TAG, "RegisterResponse (%zu bytes)", reg_resp_len);
 
     tsnode_register_response_t reg_result;
     err = tsnode_register_parse_response(&reg_result,
-                                          (const char *)reg_resp,
+                                          (const char *)s_reg_resp,
                                           reg_resp_len);
     if (err != TSNODE_OK) {
         TSNODE_LOGE(TAG, "parse RegisterResponse failed: %d", err);
@@ -484,24 +524,27 @@ static tsnode_err_t do_connect(void)
     }
 
     if (reg_result.auth_url[0] != '\0') {
-        TSNODE_LOGE(TAG, "interactive auth required: %s", reg_result.auth_url);
+        /* El control plane pide login interactivo: la auth key no cubrió
+         * el registro (expirada, reusada, o ACL). Es un fallo de
+         * provisioning, no de protocolo. La URL no contiene secretos. */
+        TSNODE_LOGE(TAG, "interactive auth required: %s",
+                    reg_result.auth_url);
         return TSNODE_ERR_PROVISIONING;
     }
 
     if (!reg_result.machine_authorized) {
-        TSNODE_LOGW(TAG, "machine not yet authorized, waiting...");
-        /* In real Tailscale, this means the node needs approval.
-         * For v1, we report this and continue polling. */
+        /* Auth key aceptada pero device approval pendiente en la tailnet:
+         * el nodo queda registrado esperando aprobación humana. */
+        TSNODE_LOGW(TAG, "machine not yet authorized (device approval)");
     }
+    TSNODE_LOGI(TAG, "registration done");
 
-    TSNODE_LOGI(TAG, "registration OK");
-
-    /* Step 7: Map sync */
+    /* Step 9: Map sync via POST /machine/map (h2). */
     set_state(TSNODE_CLIENT_MAP_SYNC);
     uint8_t zero_disco[32] = {0};
-    char map_buf[MAP_REQUEST_BUF_SIZE];
-    size_t map_len;
-    err = tsnode_map_build_request(map_buf, sizeof(map_buf), &map_len,
+    char map_req[MAP_REQUEST_BUF_SIZE];
+    size_t map_req_len;
+    err = tsnode_map_build_request(map_req, sizeof(map_req), &map_req_len,
                                     s_node_key,
                                     zero_disco,
                                     s_config.hostname,
@@ -511,26 +554,29 @@ static tsnode_err_t do_connect(void)
         return err;
     }
 
-    err = ts2021_record_send(&s_conn, (const uint8_t *)map_buf, map_len);
+    size_t map_wire_len;
+    err = h2_post(&s_h2, s_config.control_host, "/machine/map",
+                  lb_value, (const uint8_t *)map_req, map_req_len,
+                  s_map_resp, sizeof(s_map_resp) - 1, &map_wire_len);
     if (err != TSNODE_OK) {
-        TSNODE_LOGE(TAG, "send MapRequest failed: %d", err);
+        TSNODE_LOGE(TAG, "map POST failed: %d", err);
         return err;
     }
+    s_map_resp[map_wire_len] = '\0';
+    TSNODE_LOGI(TAG, "MapResponse (%zu bytes wire)", map_wire_len);
 
-    uint8_t map_resp[MAP_RESPONSE_BUF_SIZE];
-    size_t map_resp_len;
-    err = ts2021_record_recv(&s_conn, map_resp, sizeof(map_resp),
-                              &map_resp_len);
+    const uint8_t *map_json = NULL;
+    size_t map_json_len = 0;
+    err = tsnode_map_parse_framed(s_map_resp, map_wire_len,
+                                   &map_json, &map_json_len);
     if (err != TSNODE_OK) {
-        TSNODE_LOGE(TAG, "recv MapResponse failed: %d", err);
+        TSNODE_LOGE(TAG, "parse MapResponse framing failed: %d", err);
         return err;
     }
-    map_resp[map_resp_len] = '\0';
-    TSNODE_LOGI(TAG, "MapResponse (%zu bytes): %s", map_resp_len, (char *)map_resp);
 
     tsnode_map_netmap_t netmap;
-    err = tsnode_map_parse_response(&netmap, (const char *)map_resp,
-                                     map_resp_len);
+    err = tsnode_map_parse_response(&netmap, (const char *)map_json,
+                                     map_json_len);
     if (err != TSNODE_OK) {
         TSNODE_LOGE(TAG, "parse MapResponse failed: %d", err);
         return err;
@@ -559,8 +605,8 @@ static void client_task(void *arg)
 
     /* TODO: map polling loop, reconnection logic */
 
-    /* Task self-deletes */
-    vTaskDelete(NULL);
+    /* Task self-deletes via port (ADR-0006) */
+    tsnode_port_task_delete_self();
 }
 
 /* ---- Public API ---- */

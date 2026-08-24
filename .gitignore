@@ -21,6 +21,9 @@ secrets.*.yaml
 *.elf.map
 coredump*
 
+# Binarios de tests host
+tests/unit/test_h2
+
 # Sistema
 .DS_Store
 *.swp

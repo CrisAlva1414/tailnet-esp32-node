@@ -98,3 +98,8 @@ tsnode_err_t tsnode_port_task_create(tsnode_port_task_fn fn, void *arg,
     }
     return TSNODE_OK;
 }
+
+void tsnode_port_task_delete_self(void)
+{
+    vTaskDelete(NULL);
+}
