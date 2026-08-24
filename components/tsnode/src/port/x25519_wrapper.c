@@ -1,17 +1,41 @@
 /*
- * X25519 raw operations — direct use of Hacl_Curve25519 from mbedTLS/Everest.
+ * X25519 raw operations — using mbedTLS ECP with Curve25519.
  *
  * Provides raw 32-byte X25519 operations needed by Noise IK.
- * This IS platform-specific (mbedTLS + Everest) — lives in src/port/.
+ * Uses mbedTLS ECP module which is always available (no Everest needed).
  */
 
 #include "x25519_wrapper.h"
 
 #include <string.h>
 
-#include "mbedtls/platform.h"
+#include "esp_random.h"
+#include "mbedtls/ecp.h"
 #include "mbedtls/ctr_drbg.h"
-#include "everest/Hacl_Curve25519.h"
+#include "mbedtls/platform_util.h"
+
+/* ESP-IDF entropy source for mbedTLS DRBG */
+static int esp_entropy_func(void *ctx, unsigned char *buf, size_t len)
+{
+    (void)ctx;
+    esp_fill_random(buf, len);
+    return 0;
+}
+
+/* Lazy-initialized DRBG for ECP operations that require f_rng */
+static mbedtls_ctr_drbg_context s_ctr_drbg;
+static bool s_rng_initialized;
+
+static int ensure_rng(void)
+{
+    if (s_rng_initialized) return 0;
+    mbedtls_ctr_drbg_init(&s_ctr_drbg);
+    int ret = mbedtls_ctr_drbg_seed(&s_ctr_drbg, esp_entropy_func, NULL,
+                                     (const unsigned char *)"tsnode", 6);
+    if (ret != 0) return -1;
+    s_rng_initialized = true;
+    return 0;
+}
 
 int tsnode_x25519_keygen(uint8_t priv_out[32], uint8_t pub_out[32])
 {
@@ -19,32 +43,81 @@ int tsnode_x25519_keygen(uint8_t priv_out[32], uint8_t pub_out[32])
         return -1;
     }
 
-    /* Generate 32 random bytes for private key */
-    int ret = mbedtls_ctr_drbg_random(NULL, priv_out, 32);
-    if (ret != 0) {
+    if (ensure_rng() != 0) return -1;
+
+    mbedtls_ecp_group grp;
+    mbedtls_ecp_point Q;
+    mbedtls_mpi d;
+    int ret;
+
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_ecp_point_init(&Q);
+    mbedtls_mpi_init(&d);
+
+    /* Setup Curve25519 group */
+    ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
+    if (ret != 0) goto cleanup;
+
+    /* Generate keypair: d (private), Q (public) */
+    ret = mbedtls_ecp_gen_keypair(&grp, &d, &Q,
+                                    mbedtls_ctr_drbg_random, &s_ctr_drbg);
+    if (ret != 0) goto cleanup;
+
+    /* Export private key as little-endian 32 bytes */
+    ret = mbedtls_mpi_write_binary_le(&d, priv_out, 32);
+    if (ret != 0) goto cleanup;
+
+    /* Export public key as little-endian 32 bytes (x-coordinate only for Curve25519) */
+    size_t olen;
+    ret = mbedtls_ecp_point_write_binary(&grp, &Q,
+                                          MBEDTLS_ECP_PF_COMPRESSED,
+                                          &olen, pub_out, 32);
+    if (ret != 0) goto cleanup;
+
+cleanup:
+    mbedtls_ecp_group_free(&grp);
+    mbedtls_ecp_point_free(&Q);
+    mbedtls_mpi_free(&d);
+    return (ret == 0) ? 0 : -1;
+}
+
+int tsnode_x25519_publickey(const uint8_t priv[32], uint8_t pub_out[32])
+{
+    if (priv == NULL || pub_out == NULL) {
         return -1;
     }
 
-    /* Clamp private key per X25519 spec (RFC 7748 Section 5) */
-    priv_out[0]  &= 248;
-    priv_out[31] &= 127;
-    priv_out[31] |= 64;
+    if (ensure_rng() != 0) return -1;
 
-    /* Compute public key: pub = X25519(priv, G) */
-    uint8_t base[32] = {0};
-    base[0] = 9;
-    uint8_t priv_tmp[32];
-    memcpy(priv_tmp, priv_out, 32);
-    Hacl_Curve25519_crypto_scalarmult(pub_out, priv_tmp, base);
-    mbedtls_platform_zeroize(priv_tmp, sizeof(priv_tmp));
+    mbedtls_ecp_group grp;
+    mbedtls_ecp_point Q;
+    mbedtls_mpi d;
+    int ret;
 
-    /* Verify not point at infinity */
-    uint8_t zero[32] = {0};
-    if (memcmp(pub_out, zero, 32) == 0) {
-        return -1;
-    }
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_ecp_point_init(&Q);
+    mbedtls_mpi_init(&d);
 
-    return 0;
+    ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
+    if (ret != 0) goto cleanup;
+
+    ret = mbedtls_mpi_read_binary_le(&d, priv, 32);
+    if (ret != 0) goto cleanup;
+
+    ret = mbedtls_ecp_mul(&grp, &Q, &d, &grp.G,
+                           mbedtls_ctr_drbg_random, &s_ctr_drbg);
+    if (ret != 0) goto cleanup;
+
+    size_t olen;
+    ret = mbedtls_ecp_point_write_binary(&grp, &Q,
+                                          MBEDTLS_ECP_PF_COMPRESSED,
+                                          &olen, pub_out, 32);
+
+cleanup:
+    mbedtls_ecp_group_free(&grp);
+    mbedtls_ecp_point_free(&Q);
+    mbedtls_mpi_free(&d);
+    return ret;
 }
 
 int tsnode_x25519_shared(uint8_t shared[32], const uint8_t priv[32],
@@ -54,24 +127,58 @@ int tsnode_x25519_shared(uint8_t shared[32], const uint8_t priv[32],
         return -1;
     }
 
-    /* Reject all-zero public key (invalid point) */
+    mbedtls_ecp_group grp;
+    mbedtls_ecp_point Q;
+    mbedtls_ecp_point R;
+    mbedtls_mpi d;
+    mbedtls_mpi r;
+    int ret;
+
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_ecp_point_init(&Q);
+    mbedtls_ecp_point_init(&R);
+    mbedtls_mpi_init(&d);
+    mbedtls_mpi_init(&r);
+
+    /* Setup Curve25519 group */
+    ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
+    if (ret != 0) goto cleanup;
+
+    /* Import private key from little-endian bytes */
+    ret = mbedtls_mpi_read_binary_le(&d, priv, 32);
+    if (ret != 0) goto cleanup;
+
+    /* Import public key from compressed format */
+    ret = mbedtls_ecp_point_read_binary(&grp, &Q, pub, 32);
+    if (ret != 0) goto cleanup;
+
+    /* Verify point is on curve */
+    ret = mbedtls_ecp_check_pubkey(&grp, &Q);
+    if (ret != 0) goto cleanup;
+
+    /* Scalar multiplication: R = d * Q */
+    if (ensure_rng() != 0) { ret = -1; goto cleanup; }
+    ret = mbedtls_ecp_mul(&grp, &R, &d, &Q, mbedtls_ctr_drbg_random, &s_ctr_drbg);
+    if (ret != 0) goto cleanup;
+
+    /* Export x-coordinate as little-endian 32 bytes */
+    size_t olen;
+    ret = mbedtls_ecp_point_write_binary(&grp, &R,
+                                          MBEDTLS_ECP_PF_COMPRESSED,
+                                          &olen, shared, 32);
+    if (ret != 0) goto cleanup;
+
+    /* Check not point at infinity (all zeros) */
     uint8_t zero[32] = {0};
-    if (memcmp(pub, zero, 32) == 0) {
-        return -1;
-    }
-
-    uint8_t pub_tmp[32];
-    uint8_t priv_tmp[32];
-    memcpy(pub_tmp, pub, 32);
-    memcpy(priv_tmp, priv, 32);
-    Hacl_Curve25519_crypto_scalarmult(shared, priv_tmp, pub_tmp);
-    mbedtls_platform_zeroize(pub_tmp, sizeof(pub_tmp));
-    mbedtls_platform_zeroize(priv_tmp, sizeof(priv_tmp));
-
-    /* Reject shared secret = 0 (invalid) */
     if (memcmp(shared, zero, 32) == 0) {
-        return -1;
+        ret = -1;
     }
 
-    return 0;
+cleanup:
+    mbedtls_ecp_group_free(&grp);
+    mbedtls_ecp_point_free(&Q);
+    mbedtls_ecp_point_free(&R);
+    mbedtls_mpi_free(&d);
+    mbedtls_mpi_free(&r);
+    return (ret == 0) ? 0 : -1;
 }

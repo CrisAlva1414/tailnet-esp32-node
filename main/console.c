@@ -14,10 +14,12 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_system.h"
 
 #include "prov_store.h"
 #include "tsnode.h"
+#include "tsnode_client.h"
 #include "wifi_app.h"
 
 #define CONSOLE_TAG "console"
@@ -84,6 +86,7 @@ static void cmd_help(void)
         "  help                  esta ayuda\r\n"
         "  wifi set <ssid>       pide PSK sin echo, guarda y conecta\r\n"
         "  tskey set             pide auth key sin echo, valida prefijo\r\n"
+        "  tsconnect             conecta a la tailnet (requiere wifi + tskey)\r\n"
         "  status                estado tsnode + wi-fi + IP\r\n"
         "  provision status      que credenciales hay cargadas\r\n"
         "  provision wipe        borra credenciales provisionadas\r\n"
@@ -181,6 +184,47 @@ static void cmd_provision_status(void)
     console_write(line);
 }
 
+static void cmd_tsconnect(void)
+{
+    if (!wifi_app_is_connected()) {
+        console_write("error: wifi no conectada\r\n");
+        return;
+    }
+
+    char auth_key[PROV_TSKEY_MAX_LEN];
+    tsnode_err_t terr = prov_store_get_tskey(auth_key, sizeof(auth_key));
+    if (terr != TSNODE_OK) {
+        console_write("error: no hay auth key cargada (usar 'tskey set')\r\n");
+        return;
+    }
+
+    /* Get hostname from ESP32 MAC */
+    char hostname[32];
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(hostname, sizeof(hostname), "esp32-%02x%02x%02x",
+             mac[3], mac[4], mac[5]);
+
+    tsnode_client_config_t cfg = {
+        .control_host = "controlplane.tailscale.com",
+        .control_port = 80,
+        .auth_key = auth_key,
+        .hostname = hostname,
+    };
+    memset(cfg.machine_key_priv, 0, sizeof(cfg.machine_key_priv));
+
+    terr = tsnode_client_start(&cfg);
+    memset(auth_key, 0, sizeof(auth_key));
+
+    if (terr != TSNODE_OK) {
+        console_write("error arrancando cliente: ");
+        console_write(tsnode_err_name(terr));
+        console_write("\r\n");
+        return;
+    }
+    console_write("cliente iniciado (ver logs)\r\n");
+}
+
 static void dispatch(char *line)
 {
     if (strncmp(line, "help", 4) == 0) {
@@ -193,6 +237,10 @@ static void dispatch(char *line)
     }
     if (strcmp(line, "tskey set") == 0) {
         cmd_tskey_set();
+        return;
+    }
+    if (strcmp(line, "tsconnect") == 0) {
+        cmd_tsconnect();
         return;
     }
     if (strcmp(line, "status") == 0) {

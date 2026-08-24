@@ -5,6 +5,7 @@
 #include "wifi_app.h"
 
 #include <esp_event.h>
+#include <inttypes.h>
 #include <esp_netif.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
@@ -21,10 +22,25 @@ static bool s_connected;
 static bool s_config_applied;
 static char s_ip[16];
 static int64_t s_last_connect_attempt_ms;
+static esp_timer_handle_t s_reconnect_timer;
 
 static int64_t now_ms(void)
 {
     return esp_timer_get_time() / 1000;
+}
+
+static void reconnect_timer_cb(void *arg)
+{
+    (void)arg;
+    if (s_config_applied) {
+        s_last_connect_attempt_ms = now_ms();
+        esp_err_t err = esp_wifi_connect();
+        if (err != ESP_OK) {
+            ESP_LOGE(WIFI_TAG, "reconnect (timer) -> %s", esp_err_to_name(err));
+        } else {
+            ESP_LOGI(WIFI_TAG, "reconnect (timer) disparado");
+        }
+    }
 }
 
 static void event_handler(void *arg, esp_event_base_t base, int32_t id,
@@ -54,7 +70,9 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id,
         s_ip[0] = '\0';
         /*
          * Reconexión con piso de tiempo: evita girar en seco contra un AP
-         * ausente (el handler no debe bloquear). 5s entre intentos.
+         * ausente (el handler no debe bloquear). Si el último intento fue
+         * hace menos de RECONNECT_MIN_INTERVAL_MS, programar un timer
+         * para reintentar cuando se cumpla el intervalo.
          */
         int64_t elapsed = now_ms() - s_last_connect_attempt_ms;
         if (elapsed >= RECONNECT_MIN_INTERVAL_MS) {
@@ -64,7 +82,12 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id,
                 ESP_LOGE(WIFI_TAG, "reconnect -> %s", esp_err_to_name(err));
             }
         } else {
-            ESP_LOGW(WIFI_TAG, "desconectado; reintento programado");
+            int64_t remaining_ms = RECONNECT_MIN_INTERVAL_MS - elapsed;
+            ESP_LOGW(WIFI_TAG, "desconectado; reintento en %" PRId64 "ms",
+                     remaining_ms);
+            esp_timer_stop(s_reconnect_timer);
+            esp_timer_start_once(s_reconnect_timer,
+                                 (uint64_t)remaining_ms * 1000);
         }
         return;
     }
@@ -121,6 +144,18 @@ static tsnode_err_t init_stack_once(void)
         ESP_LOGE(WIFI_TAG, "start -> %s", esp_err_to_name(err));
         return TSNODE_ERR_NETWORK;
     }
+    /* Timer para reconexión diferida cuando el intervalo mínimo no se ha
+     * cumplido: evita reconexión inmediata pero garantiza que no se
+     * pierda el reintento. */
+    esp_timer_create_args_t timer_args = {
+        .callback = reconnect_timer_cb,
+        .name = "wifi_reconnect",
+    };
+    err = esp_timer_create(&timer_args, &s_reconnect_timer);
+    if (err != ESP_OK) {
+        ESP_LOGE(WIFI_TAG, "timer create -> %s", esp_err_to_name(err));
+        return TSNODE_ERR_NETWORK;
+    }
     stack_ready = true;
     return TSNODE_OK;
 }
@@ -154,6 +189,11 @@ tsnode_err_t wifi_app_apply_credentials(const char *ssid, const char *psk)
     if (terr != TSNODE_OK) {
         return terr;
     }
+    /* Detener reconexión activa antes de aplicar nueva config; si no,
+     * esp_wifi_set_config falla con ESP_ERR_WIFI_STATE. */
+    esp_wifi_disconnect();
+    esp_timer_stop(s_reconnect_timer);
+
     wifi_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     /* Truncamiento imposible por validación previa de prov_store; se

@@ -33,6 +33,13 @@ int tsnode_x25519_shared(uint8_t shared[32], const uint8_t priv[32],
  */
 int tsnode_x25519_keygen(uint8_t priv_out[32], uint8_t pub_out[32]);
 
+/*
+ * Derive public key from existing private key: pub = X25519(priv, G).
+ * priv must be 32 bytes, pub_out must be 32 bytes.
+ * Returns 0 on success.
+ */
+int tsnode_x25519_publickey(const uint8_t priv[32], uint8_t pub_out[32]);
+
 #ifdef __cplusplus
 }
 #endif

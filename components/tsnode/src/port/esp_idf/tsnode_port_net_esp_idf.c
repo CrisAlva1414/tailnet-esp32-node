@@ -12,6 +12,7 @@
 
 #include "mbedtls/ssl.h"
 #include "mbedtls/ctr_drbg.h"
+#include "mbedtls/entropy.h"
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/error.h"
 #include "mbedtls/net_sockets.h"
@@ -19,6 +20,29 @@
 #include "tsnode_port.h"
 
 static const char *TAG = "tsnode_port_net";
+
+/* Global DRBG state: entropy source + CTR_DRBG. Initialized once. */
+static mbedtls_entropy_context s_entropy;
+static mbedtls_ctr_drbg_context s_ctr_drbg;
+static bool s_rng_initialized;
+
+static int init_rng(void)
+{
+    if (s_rng_initialized) {
+        return 0;
+    }
+    mbedtls_entropy_init(&s_entropy);
+    mbedtls_ctr_drbg_init(&s_ctr_drbg);
+    int ret = mbedtls_ctr_drbg_seed(&s_ctr_drbg, mbedtls_entropy_func,
+                                     &s_entropy,
+                                     (const unsigned char *)"tsnode", 6);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "ctr_drbg_seed: -0x%04x", -ret);
+        return ret;
+    }
+    s_rng_initialized = true;
+    return 0;
+}
 
 /* Socket opaco: contends TCP (mbedTLS net) + TLS context */
 struct tsnode_port_socket {
@@ -83,17 +107,17 @@ tsnode_err_t tsnode_port_tls_connect(tsnode_port_socket_t **out_sock,
         return TSNODE_ERR_NO_MEMORY;
     }
 
+    /* Ensure RNG is initialized */
+    int ret = init_rng();
+    if (ret != 0) {
+        free(s);
+        return TSNODE_ERR_CRYPTO;
+    }
+
     mbedtls_net_init(&s->net);
     mbedtls_ssl_init(&s->ssl);
     mbedtls_ssl_config_init(&s->conf);
     mbedtls_x509_crt_init(&s->ca_certs);
-
-    /* Load system CA bundle */
-    int ret = esp_crt_bundle_attach(&s->ca_certs);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "crt_bundle_attach failed: %s", esp_err_to_name(ret));
-        goto fail;
-    }
 
     /* Configure TLS */
     ret = mbedtls_ssl_config_defaults(&s->conf,
@@ -105,10 +129,16 @@ tsnode_err_t tsnode_port_tls_connect(tsnode_port_socket_t **out_sock,
         goto fail;
     }
 
+    /* Load system CA bundle (must be after ssl_config_defaults) */
+    ret = esp_crt_bundle_attach(&s->conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "crt_bundle_attach failed: %s", esp_err_to_name(ret));
+        goto fail;
+    }
+
     mbedtls_ssl_conf_authmode(&s->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
-    mbedtls_ssl_conf_ca_chain(&s->conf, &s->ca_certs, NULL);
     mbedtls_ssl_conf_rng(&s->conf, mbedtls_ctr_drbg_random,
-                         NULL);  /* DRBG initialized by ESP-IDF */
+                         &s_ctr_drbg);
 
     ret = mbedtls_ssl_setup(&s->ssl, &s->conf);
     if (ret != 0) {

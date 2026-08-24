@@ -15,10 +15,15 @@
 #include "tsnode_map.h"
 #include "tsnode_port.h"
 #include "tsnode_register.h"
+#include "x25519_wrapper.h"
+#include "base64.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #define TAG "tsnode_client"
 
-#define CONTROL_KEY_BUF_SIZE 512
+#define CONTROL_KEY_BUF_SIZE 1024
 #define REGISTER_BUF_SIZE    1024
 #define MAP_REQUEST_BUF_SIZE 1024
 #define MAP_RESPONSE_BUF_SIZE 8192
@@ -87,6 +92,10 @@ static tsnode_err_t fetch_control_key(uint8_t key_out[32])
 
     resp_buf[total] = '\0';
 
+    /* Debug: log raw response for protocol development */
+    TSNODE_LOGI(TAG, "raw /key response (%u bytes): %.200s",
+                (unsigned)total, (const char *)resp_buf);
+
     /* Parse HTTP response: find the JSON body after \r\n\r\n */
     const char *body = strstr((const char *)resp_buf, "\r\n\r\n");
     if (body == NULL) {
@@ -95,14 +104,34 @@ static tsnode_err_t fetch_control_key(uint8_t key_out[32])
     }
     body += 4;
 
-    /* Extract "PublicKey":"noise+keybase:<hex>" */
-    const char *pk_marker = "\"PublicKey\":\"noise+keybase:";
+    TSNODE_LOGI(TAG, "key response body (%u bytes): %s",
+                (unsigned)strlen(body), body);
+
+    /* Extract "publicKey":"mkey:<hex>" — Noise public key from control server.
+     * JSON may have tabs/newlines, so search for the key without strict spacing. */
+    const char *pk_marker = "\"publicKey\"";
     const char *pk = strstr(body, pk_marker);
+    if (pk != NULL) {
+        /* Skip past the key name and any whitespace/colon/quote */
+        pk += strlen(pk_marker);
+        while (*pk == ' ' || *pk == ':' || *pk == '\t' || *pk == '\n' || *pk == '"') pk++;
+        /* Skip "mkey:" prefix if present */
+        if (strncmp(pk, "mkey:", 5) == 0) pk += 5;
+
+        TSNODE_LOGI(TAG, "publicKey hex start: %.70s", pk);
+        /* Debug: dump all 64 hex chars as codes */
+        for (int d = 0; d < 64; d++) {
+            char ch = pk[d];
+            if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F'))) {
+                TSNODE_LOGE(TAG, "BAD hex[%d] = 0x%02x '%c'", d, (uint8_t)ch,
+                            (ch >= 0x20 && ch < 0x7f) ? ch : '?');
+            }
+        }
+    }
     if (pk == NULL) {
         TSNODE_LOGE(TAG, "PublicKey not found in /key response");
         return TSNODE_ERR_NETWORK;
     }
-    pk += strlen(pk_marker);
 
     /* Decode hex (64 chars = 32 bytes) */
     for (int i = 0; i < 32; i++) {
@@ -150,16 +179,40 @@ static tsnode_err_t do_connect(void)
         }
     }
     if (need_gen) {
-        err = tsnode_port_random_bytes(s_config.machine_key_priv, 32);
-        if (err != TSNODE_OK) return err;
+        /* Use mbedTLS keygen which applies proper X25519 clamping internally */
+        uint8_t temp_pub[32];
+        if (tsnode_x25519_keygen(s_config.machine_key_priv, temp_pub) != 0) {
+            return TSNODE_ERR_CRYPTO;
+        }
         TSNODE_LOGI(TAG, "generated new machine key");
     }
 
     /* Step 2b: Generate node key (WireGuard identity) from random */
-    err = tsnode_port_random_bytes(s_node_key, 32);
-    if (err != TSNODE_OK) return err;
+    uint8_t node_key_pub_tmp[32];
+    if (tsnode_x25519_keygen(s_node_key, node_key_pub_tmp) != 0) {
+        return TSNODE_ERR_CRYPTO;
+    }
 
-    /* Step 3: TCP connect to control plane */
+    /* Step 3: Generate Noise initiation before TCP connect */
+    ts2021_handshake_state_t hs_state;
+    uint8_t noise_init[101];
+    /* Protocol version = CurrentCapabilityVersion from tailcfg (145 as of 2026) */
+    err = ts2021_handshake_initiate(&hs_state, noise_init,
+                                     s_config.machine_key_priv,
+                                     control_key, 145);
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "Noise initiate failed: %d", err);
+        return err;
+    }
+
+    /* Base64-encode initiation for HTTP header */
+    char init_b64[160];
+    size_t b64_len = tsnode_base64_encode(init_b64, sizeof(init_b64), noise_init, 101);
+    TSNODE_LOGI(TAG, "init msg [%02x %02x %02x %02x %02x] b64_len=%zu",
+                noise_init[0], noise_init[1], noise_init[2],
+                noise_init[3], noise_init[4], b64_len);
+
+    /* Step 4: TCP connect to control plane */
     set_state(TSNODE_CLIENT_HANDSHAKING);
     tsnode_port_socket_t *sock = NULL;
     err = tsnode_port_tcp_connect(&sock, s_config.control_host,
@@ -169,15 +222,16 @@ static tsnode_err_t do_connect(void)
         return err;
     }
 
-    /* Step 4: HTTP upgrade to ts2021 */
-    char upgrade_req[256];
+    /* Step 5: HTTP upgrade to ts2021 with X-Tailscale-Handshake header */
+    char upgrade_req[512];
     int n = snprintf(upgrade_req, sizeof(upgrade_req),
-                     "GET /ts2021 HTTP/1.1\r\n"
+                     "POST /ts2021 HTTP/1.1\r\n"
                      "Host: %s\r\n"
                      "Upgrade: tailscale-control-protocol\r\n"
-                     "Connection: Upgrade\r\n"
+                     "Connection: upgrade\r\n"
+                     "X-Tailscale-Handshake: %s\r\n"
                      "\r\n",
-                     s_config.control_host);
+                     s_config.control_host, init_b64);
     err = tsnode_port_socket_write(sock, (const uint8_t *)upgrade_req,
                                     (size_t)n, 5000);
     if (err != TSNODE_OK) {
@@ -201,6 +255,7 @@ static tsnode_err_t do_connect(void)
         resp[resp_total] = '\0';
 
         if (strstr((const char *)resp, "\r\n\r\n") != NULL) {
+            TSNODE_LOGI(TAG, "upgrade response: %s", (const char *)resp);
             got_101 = (strstr((const char *)resp, "101") != NULL);
             break;
         }
@@ -214,15 +269,69 @@ static tsnode_err_t do_connect(void)
     }
     TSNODE_LOGI(TAG, "HTTP 101 Switching Protocols OK");
 
-    /* Step 5: Noise IK handshake */
-    err = ts2021_handshake_client(&s_conn, s_config.machine_key_priv,
-                                   control_key, 1, sock);
-    if (err != TSNODE_OK) {
-        TSNODE_LOGE(TAG, "Noise handshake failed: %d", err);
-        return err;
+    /* The HTTP read loop may have already consumed the Noise response
+     * bytes along with the HTTP headers. Check for extra bytes. */
+    const char *hend = strstr((const char *)resp, "\r\n\r\n");
+    size_t hdr_len = (hend != NULL) ? (size_t)(hend - (const char *)resp + 4) : resp_total;
+    size_t leftover = resp_total - hdr_len;
+
+    /* Step 6: Read Noise response (51 bytes) and complete handshake */
+    uint8_t noise_resp[51];
+    size_t resp_read = 0;
+
+    /* If extra bytes were already read from the HTTP loop, use them */
+    if (leftover >= 51) {
+        memcpy(noise_resp, resp + hdr_len, 51);
+        resp_read = 51;
+        TSNODE_LOGI(TAG, "Noise response found in HTTP read (%zu extra)", leftover);
+        /* Dump extra bytes beyond Noise response to see if server sent more */
+        if (leftover > 51) {
+            size_t extra = leftover - 51;
+            if (extra > 64) extra = 64;
+            char hexbuf[133];
+            for (size_t i = 0; i < extra; i++) {
+                snprintf(hexbuf + i*2, 3, "%02x", (uint8_t)resp[hdr_len + 51 + i]);
+            }
+            hexbuf[extra*2] = '\0';
+            TSNODE_LOGI(TAG, "extra %zu bytes after Noise: %s", extra, hexbuf);
+        }
+    } else if (leftover > 0) {
+        memcpy(noise_resp, resp + hdr_len, leftover);
+        resp_read = leftover;
     }
 
-    /* Step 6: Register with auth key */
+    /* Read remaining bytes from socket */
+    while (resp_read < 51) {
+        size_t n;
+        err = tsnode_port_socket_read(sock, noise_resp + resp_read,
+                                       51 - resp_read, &n, 10000);
+        if (err != TSNODE_OK || n == 0) break;
+        resp_read += n;
+    }
+    if (err != TSNODE_OK || resp_read != 51) {
+        TSNODE_LOGE(TAG, "read Noise response failed: resp_read=%zu err=%d",
+                    resp_read, err);
+        tsnode_port_socket_close(sock);
+        return (err == TSNODE_OK) ? TSNODE_ERR_NETWORK : err;
+    }
+
+    err = ts2021_handshake_complete(&s_conn, &hs_state, noise_resp, sock);
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "Noise handshake complete failed: %d", err);
+        return err;
+    }
+    TSNODE_LOGI(TAG, "Noise handshake OK");
+
+    /* Prebuffer any leftover bytes from the HTTP read that follow the
+     * 51-byte Noise response.  These are server transport frames that
+     * arrived in the same TCP segment and must be available to the
+     * record layer. */
+    if (leftover > 51) {
+        ts2021_conn_prebuffer(&s_conn, (const uint8_t *)resp + hdr_len + 51,
+                               leftover - 51);
+    }
+
+    /* Step 7: Register with auth key */
     set_state(TSNODE_CLIENT_REGISTERING);
     char reg_buf[REGISTER_BUF_SIZE];
     size_t reg_len;
@@ -238,15 +347,18 @@ static tsnode_err_t do_connect(void)
     }
 
     /* Send RegisterRequest over record layer */
+    TSNODE_LOGI(TAG, "sending RegisterRequest (%zu bytes)", reg_len);
     err = ts2021_record_send(&s_conn, (const uint8_t *)reg_buf, reg_len);
     if (err != TSNODE_OK) {
         TSNODE_LOGE(TAG, "send RegisterRequest failed: %d", err);
         return err;
     }
+    TSNODE_LOGI(TAG, "RegisterRequest sent OK");
 
     /* Receive RegisterResponse */
     uint8_t reg_resp[2048];
     size_t reg_resp_len;
+    TSNODE_LOGI(TAG, "waiting for RegisterResponse...");
     err = ts2021_record_recv(&s_conn, reg_resp, sizeof(reg_resp),
                               &reg_resp_len);
     if (err != TSNODE_OK) {
@@ -344,7 +456,8 @@ static void client_task(void *arg)
 
     /* TODO: map polling loop, reconnection logic */
 
-    /* Task self-terminates by returning */
+    /* Task self-deletes */
+    vTaskDelete(NULL);
 }
 
 /* ---- Public API ---- */
@@ -370,9 +483,9 @@ tsnode_err_t tsnode_client_start(const tsnode_client_config_t *config)
 
     set_state(TSNODE_CLIENT_FETCHING_KEY);
 
-    /* Create task via port (4096 bytes stack, priority 5) */
+    /* Create task via port (40KB stack for mbedTLS + crypto, priority 5) */
     tsnode_err_t err = tsnode_port_task_create(client_task, NULL,
-                                                "tsclient", 4096, 5);
+                                                "tsclient", 40960, 5);
     if (err != TSNODE_OK) {
         TSNODE_LOGE(TAG, "task create failed: %d", err);
         return err;

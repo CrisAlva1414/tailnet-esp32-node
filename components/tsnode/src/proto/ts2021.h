@@ -31,7 +31,51 @@ typedef struct {
     uint64_t rx_counter;             /* Incoming nonce counter */
     tsnode_port_socket_t *sock;      /* Underlying TCP socket */
     bool established;                /* true after Split() */
+    /* Read-ahead buffer: leftover bytes from HTTP read consumed before
+     * the record layer was established.  The record layer reads from
+     * this buffer first, then from the socket. */
+    uint8_t prebuf[512];             /* Pre-buffered data */
+    size_t prebuf_len;               /* Valid bytes in prebuf */
 } ts2021_conn_t;
+
+/*
+ * Noise IK handshake state for split handshake (HTTP upgrade flow).
+ * Used when the initiation must be sent in an HTTP header before
+ * the TCP connection is fully available.
+ */
+typedef struct {
+    uint8_t handshake_hash[32];      /* Current handshake hash */
+    uint8_t chaining_key[32];        /* Current chaining key */
+    uint8_t eph_priv[32];            /* Ephemeral private key */
+    uint8_t eph_pub[32];             /* Ephemeral public key */
+    uint8_t machine_key_priv[32];    /* Machine private key (copy) */
+    uint8_t control_key_pub[32];     /* Control server public key (copy) */
+    uint16_t protocol_version;       /* Protocol version */
+    bool initiated;                  /* true after initiate */
+} ts2021_handshake_state_t;
+
+/*
+ * Generate Noise IK initiation message (101 bytes) for HTTP upgrade header.
+ * The initiation is returned in `init_out` (must be at least 101 bytes).
+ * State is saved in `state` for later completion via _complete().
+ */
+tsnode_err_t ts2021_handshake_initiate(
+    ts2021_handshake_state_t *state,
+    uint8_t init_out[101],
+    const uint8_t machine_key_priv[32],
+    const uint8_t control_key_pub[32],
+    uint16_t protocol_version);
+
+/*
+ * Complete Noise IK handshake after receiving server response.
+ * Call this after HTTP 101 Switching Protocols with the 51-byte response.
+ * On success, conn is populated with session keys.
+ */
+tsnode_err_t ts2021_handshake_complete(
+    ts2021_conn_t *conn,
+    const ts2021_handshake_state_t *state,
+    const uint8_t response[51],
+    tsnode_port_socket_t *sock);
 
 /*
  * Perform Noise IK handshake as client.
@@ -67,6 +111,14 @@ tsnode_err_t ts2021_record_recv(ts2021_conn_t *conn, uint8_t *buf,
  * Close connection and clean up. Idempotent.
  */
 void ts2021_conn_close(ts2021_conn_t *conn);
+
+/*
+ * Inject leftover bytes from the HTTP read into the connection's read buffer.
+ * These bytes will be consumed by the next ts2021_record_recv() calls.
+ * Must be called before any record_recv (i.e., after handshake_complete).
+ */
+void ts2021_conn_prebuffer(ts2021_conn_t *conn, const uint8_t *data,
+                            size_t len);
 
 #ifdef __cplusplus
 }

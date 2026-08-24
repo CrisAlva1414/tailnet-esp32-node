@@ -27,7 +27,6 @@
 #include "mbedtls/platform_util.h"
 #include "mbedtls/chachapoly.h"
 #include "mbedtls/error.h"
-#include "everest/Hacl_Curve25519.h"
 #include "x25519_wrapper.h"
 
 #include "tsnode_port.h"
@@ -188,13 +187,17 @@ static void noise_key_derive(uint8_t new_ck[32], uint8_t key[32],
 
 static void noise_split(uint8_t c1[32], uint8_t c2[32], const uint8_t ck[32])
 {
-    /* HKDF-Expand(prk=ck, info=nil, L=64) -> c1 || c2 */
+    /* HKDF-Extract(salt=ck, IKM=nil) -> prk */
+    uint8_t prk[32];
+    hmac_blake2s(prk, ck, 32, (const uint8_t *)"", 0);
+
+    /* HKDF-Expand(prk, info=nil, L=64) -> c1 || c2 */
     uint8_t block_o[64], block_i[64];
     memset(block_o, 0x5c, 64);
     memset(block_i, 0x36, 64);
     for (int i = 0; i < 32; i++) {
-        block_o[i] ^= ck[i];
-        block_i[i] ^= ck[i];
+        block_o[i] ^= prk[i];
+        block_i[i] ^= prk[i];
     }
 
     uint8_t inner[32];
@@ -307,24 +310,21 @@ tsnode_err_t ts2021_handshake_client(ts2021_conn_t *conn,
     }
 
     /* Get our machine public key from private */
-    uint8_t mach_base[32] = {0};
-    mach_base[0] = 9;
-    uint8_t mach_priv_tmp[32];
-    memcpy(mach_priv_tmp, machine_key_priv, 32);
-    Hacl_Curve25519_crypto_scalarmult(machine_key_pub, mach_priv_tmp,
-                                       mach_base);
-    mbedtls_platform_zeroize(mach_priv_tmp, sizeof(mach_priv_tmp));
+    if (tsnode_x25519_publickey(machine_key_priv, machine_key_pub) != 0) {
+        err = TSNODE_ERR_CRYPTO; goto cleanup;
+    }
 
     /* Initialize symmetric state: h = ck = Hash(protocolName) */
     noise_sym_init(&s);
 
-    /* Prologue: "Tailscale Control Protocol v" + version */
+    /* Prologue: "Tailscale Control Protocol v" + decimal version string */
     uint8_t prologue[64];
     size_t plen = strlen(PROLOGUE_PREFIX);
     memcpy(prologue, PROLOGUE_PREFIX, plen);
-    prologue[plen]     = (uint8_t)(protocol_version >> 8);
-    prologue[plen + 1] = (uint8_t)(protocol_version & 0xFF);
-    plen += 2;
+    char ver_str[8];
+    int ver_len = snprintf(ver_str, sizeof(ver_str), "%u", protocol_version);
+    memcpy(prologue + plen, ver_str, ver_len);
+    plen += ver_len;
     noise_mix_hash(&s, prologue, plen);
 
     /* <- s: mixHash(serverPublicKey) */
@@ -479,6 +479,9 @@ cleanup:
 
 /* ---- Record layer ---- */
 
+static tsnode_err_t ts2021_conn_read(ts2021_conn_t *conn, uint8_t *buf,
+                                      size_t need, size_t *got, uint32_t timeout_ms);
+
 tsnode_err_t ts2021_record_send(ts2021_conn_t *conn, const uint8_t *data,
                                 size_t len)
 {
@@ -554,18 +557,26 @@ tsnode_err_t ts2021_record_recv(ts2021_conn_t *conn, uint8_t *buf,
     /* Read header: type(1) + length(2) */
     uint8_t header[3];
     size_t header_read;
-    tsnode_err_t err = tsnode_port_socket_read(conn->sock, header,
-                                                sizeof(header), &header_read,
-                                                10000);
-    if (err != TSNODE_OK) return err;
-    if (header_read != sizeof(header)) return TSNODE_ERR_NETWORK;
+    tsnode_err_t err = ts2021_conn_read(conn, header,
+                                         sizeof(header), &header_read, 10000);
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "recv header read err=%d", err);
+        return err;
+    }
+    if (header_read != sizeof(header)) {
+        TSNODE_LOGE(TAG, "recv header short: %zu bytes (type=0x%02x)", header_read, header[0]);
+        return TSNODE_ERR_NETWORK;
+    }
+
+    TSNODE_LOGI(TAG, "recv frame: type=0x%02x len=%u", header[0],
+                (unsigned)(((uint16_t)header[1] << 8) | header[2]));
 
     if (header[0] == MSG_TYPE_ERROR) {
         uint16_t err_len = ((uint16_t)header[1] << 8) | header[2];
         uint8_t err_msg[256];
         size_t err_read;
         size_t to_read = err_len < sizeof(err_msg) ? err_len : sizeof(err_msg);
-        tsnode_port_socket_read(conn->sock, err_msg, to_read, &err_read, 5000);
+        ts2021_conn_read(conn, err_msg, to_read, &err_read, 5000);
         TSNODE_LOGW(TAG, "error frame (%u bytes)", err_len);
         return TSNODE_ERR_NETWORK;
     }
@@ -582,7 +593,7 @@ tsnode_err_t ts2021_record_recv(ts2021_conn_t *conn, uint8_t *buf,
     /* Read ciphertext */
     uint8_t ct_buf[NOISE_MAX_FRAME];
     size_t ct_read;
-    err = tsnode_port_socket_read(conn->sock, ct_buf, ct_len, &ct_read, 10000);
+    err = ts2021_conn_read(conn, ct_buf, ct_len, &ct_read, 10000);
     if (err != TSNODE_OK) return err;
     if (ct_read != ct_len) return TSNODE_ERR_NETWORK;
 
@@ -612,11 +623,13 @@ tsnode_err_t ts2021_record_recv(ts2021_conn_t *conn, uint8_t *buf,
                                           ct_buf, buf);
     mbedtls_chachapoly_free(&ctx);
     if (ret != 0) {
+        TSNODE_LOGE(TAG, "recv decrypt failed: -0x%04x", -ret);
         return TSNODE_ERR_CRYPTO;
     }
 
     *out_len = ct_len - 16;
     conn->rx_counter++;
+    TSNODE_LOGI(TAG, "recv record OK: %zu bytes plaintext", *out_len);
     return TSNODE_OK;
 }
 
@@ -629,5 +642,264 @@ void ts2021_conn_close(ts2021_conn_t *conn)
     }
     mbedtls_platform_zeroize(conn->tx_key, 32);
     mbedtls_platform_zeroize(conn->rx_key, 32);
+    mbedtls_platform_zeroize(conn->prebuf, sizeof(conn->prebuf));
+    conn->prebuf_len = 0;
     conn->established = false;
+}
+
+void ts2021_conn_prebuffer(ts2021_conn_t *conn, const uint8_t *data,
+                            size_t len)
+{
+    if (conn == NULL || data == NULL || len == 0) return;
+    size_t space = sizeof(conn->prebuf) - conn->prebuf_len;
+    if (len > space) len = space;
+    memcpy(conn->prebuf + conn->prebuf_len, data, len);
+    conn->prebuf_len += len;
+    TSNODE_LOGI(TAG, "prebuffered %zu bytes (total %zu)", len, conn->prebuf_len);
+}
+
+/* Read from prebuf first, then socket */
+static tsnode_err_t ts2021_conn_read(ts2021_conn_t *conn, uint8_t *buf,
+                                      size_t need, size_t *got, uint32_t timeout_ms)
+{
+    size_t total = 0;
+    /* Consume from prebuf first */
+    if (conn->prebuf_len > 0) {
+        size_t take = (conn->prebuf_len < need) ? conn->prebuf_len : need;
+        memcpy(buf, conn->prebuf, take);
+        /* Shift remaining prebuf data */
+        if (take < conn->prebuf_len) {
+            memmove(conn->prebuf, conn->prebuf + take,
+                    conn->prebuf_len - take);
+        }
+        conn->prebuf_len -= take;
+        total += take;
+    }
+    /* Read remaining from socket */
+    while (total < need) {
+        size_t n = 0;
+        tsnode_err_t err = tsnode_port_socket_read(conn->sock, buf + total,
+                                                    need - total, &n,
+                                                    timeout_ms);
+        if (err != TSNODE_OK) {
+            *got = total;
+            return err;
+        }
+        if (n == 0) break;
+        total += n;
+    }
+    *got = total;
+    return TSNODE_OK;
+}
+
+/* ---- Split handshake: initiate + complete (for HTTP upgrade flow) ---- */
+
+tsnode_err_t ts2021_handshake_initiate(
+    ts2021_handshake_state_t *state,
+    uint8_t init_out[101],
+    const uint8_t machine_key_priv[32],
+    const uint8_t control_key_pub[32],
+    uint16_t protocol_version)
+{
+    if (state == NULL || init_out == NULL || machine_key_priv == NULL ||
+        control_key_pub == NULL) {
+        return TSNODE_ERR_INVALID_ARG;
+    }
+
+    tsnode_err_t err;
+    noise_symmetric_t s;
+    uint8_t machine_key_pub[32];
+    uint8_t eph_priv[32], eph_pub[32];
+
+    /* Generate ephemeral key pair */
+    err = tsnode_port_random_bytes(eph_priv, 32);
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "random_bytes failed: %d", err);
+        return err;
+    }
+
+    if (tsnode_x25519_keygen(eph_priv, eph_pub) != 0) {
+        TSNODE_LOGE(TAG, "x25519_keygen failed");
+        return TSNODE_ERR_CRYPTO;
+    }
+
+    /* Get our machine public key from private */
+    int pk_ret = tsnode_x25519_publickey(machine_key_priv, machine_key_pub);
+    if (pk_ret != 0) {
+        TSNODE_LOGE(TAG, "x25519_publickey failed: %d", pk_ret);
+        return TSNODE_ERR_CRYPTO;
+    }
+
+    /* Initialize symmetric state: h = ck = Hash(protocolName) */
+    noise_sym_init(&s);
+
+    /* Prologue: "Tailscale Control Protocol v" + decimal version string */
+    uint8_t prologue[64];
+    size_t plen = strlen(PROLOGUE_PREFIX);
+    memcpy(prologue, PROLOGUE_PREFIX, plen);
+    char ver_str[8];
+    int ver_len = snprintf(ver_str, sizeof(ver_str), "%u", protocol_version);
+    memcpy(prologue + plen, ver_str, ver_len);
+    plen += ver_len;
+    noise_mix_hash(&s, prologue, plen);
+
+    /* <- s: mixHash(serverPublicKey) */
+    noise_mix_hash(&s, control_key_pub, 32);
+
+    /* -> e: mixHash(ephemeralPub) */
+    noise_mix_hash(&s, eph_pub, 32);
+
+    /* -> es: MixDH(ephemeral, serverKey) */
+    uint8_t ck_new[32], k_es[32];
+    uint8_t shared_es[32];
+    if (tsnode_x25519_shared(shared_es, eph_priv, control_key_pub) != 0) {
+        TSNODE_LOGE(TAG, "x25519_shared es failed");
+        return TSNODE_ERR_CRYPTO;
+    }
+    noise_key_derive(ck_new, k_es, shared_es, s.ck);
+    memcpy(s.ck, ck_new, 32);
+    mbedtls_platform_zeroize(shared_es, sizeof(shared_es));
+
+    /* -> s: EncryptAndHash(machinePub) — 32 bytes plaintext */
+    uint8_t enc_machine_pub[48];
+    size_t enc_len;
+    err = noise_encrypt_to(enc_machine_pub, &enc_len, k_es,
+                           machine_key_pub, 32, s.h, 32);
+    if (err != TSNODE_OK) return err;
+    noise_mix_hash(&s, enc_machine_pub, enc_len);
+
+    /* -> ss: MixDH(machineKey, serverKey) */
+    uint8_t ck_new2[32], k_ss[32];
+    uint8_t shared_ss[32];
+    if (tsnode_x25519_shared(shared_ss, machine_key_priv, control_key_pub) != 0) {
+        TSNODE_LOGE(TAG, "x25519_shared ss failed");
+        return TSNODE_ERR_CRYPTO;
+    }
+    noise_key_derive(ck_new2, k_ss, shared_ss, s.ck);
+    memcpy(s.ck, ck_new2, 32);
+    mbedtls_platform_zeroize(shared_ss, sizeof(shared_ss));
+
+    /* -> ss: EncryptAndHash(nil) — empty payload, tag only */
+    uint8_t tag_ss[16];
+    size_t tag_ss_len;
+    err = noise_encrypt_to(tag_ss, &tag_ss_len, k_ss, NULL, 0, s.h, 32);
+    if (err != TSNODE_OK) return err;
+    noise_mix_hash(&s, tag_ss, tag_ss_len);
+
+    /* Assemble initiation message (101 bytes) */
+    memset(init_out, 0, 101);
+    init_out[0] = (uint8_t)(protocol_version >> 8);
+    init_out[1] = (uint8_t)(protocol_version & 0xFF);
+    init_out[2] = MSG_TYPE_INITIATION;
+    init_out[3] = 0;
+    init_out[4] = 96;
+    memcpy(init_out + 5, eph_pub, 32);
+    memcpy(init_out + 37, enc_machine_pub, 48);
+    memcpy(init_out + 85, tag_ss, 16);
+
+    /* Save state for completion */
+    memcpy(state->handshake_hash, s.h, 32);
+    memcpy(state->chaining_key, s.ck, 32);
+    memcpy(state->eph_priv, eph_priv, 32);
+    memcpy(state->eph_pub, eph_pub, 32);
+    memcpy(state->machine_key_priv, machine_key_priv, 32);
+    memcpy(state->control_key_pub, control_key_pub, 32);
+    state->protocol_version = protocol_version;
+    state->initiated = true;
+
+    /* Clean up local copies */
+    mbedtls_platform_zeroize(eph_priv, sizeof(eph_priv));
+    mbedtls_platform_zeroize(k_es, sizeof(k_es));
+    mbedtls_platform_zeroize(k_ss, sizeof(k_ss));
+
+    return TSNODE_OK;
+}
+
+tsnode_err_t ts2021_handshake_complete(
+    ts2021_conn_t *conn,
+    const ts2021_handshake_state_t *state,
+    const uint8_t response[51],
+    tsnode_port_socket_t *sock)
+{
+    if (conn == NULL || state == NULL || response == NULL || sock == NULL) {
+        return TSNODE_ERR_INVALID_ARG;
+    }
+    if (!state->initiated) {
+        return TSNODE_ERR_INVALID_STATE;
+    }
+
+    tsnode_err_t err;
+    noise_symmetric_t s;
+
+    /* Restore state */
+    memcpy(s.h, state->handshake_hash, 32);
+    memcpy(s.ck, state->chaining_key, 32);
+
+    /* Parse response: type(1) + len(2) + ephemeral_pub(32) + tag(16) */
+    if (response[0] == MSG_TYPE_ERROR) {
+        uint16_t err_len = ((uint16_t)response[1] << 8) | response[2];
+        TSNODE_LOGE(TAG, "server error frame (%u bytes)", err_len);
+        return TSNODE_ERR_NETWORK;
+    }
+    if (response[0] != MSG_TYPE_RESPONSE) {
+        TSNODE_LOGE(TAG, "unexpected response type: %u", response[0]);
+        return TSNODE_ERR_NETWORK;
+    }
+
+    uint8_t control_eph_pub[32];
+    uint8_t resp_tag[16];
+    memcpy(control_eph_pub, response + 3, 32);
+    memcpy(resp_tag, response + 35, 16);
+
+    /* <- e: mixHash(controlEphemeralPub) */
+    noise_mix_hash(&s, control_eph_pub, 32);
+
+    /* <- ee: MixDH(machineEphemeral, controlEphemeral) */
+    uint8_t ck_ee[32], k_ee[32];
+    uint8_t shared_ee[32];
+    if (tsnode_x25519_shared(shared_ee, state->eph_priv, control_eph_pub) != 0) {
+        return TSNODE_ERR_CRYPTO;
+    }
+    noise_key_derive(ck_ee, k_ee, shared_ee, s.ck);
+    memcpy(s.ck, ck_ee, 32);
+    mbedtls_platform_zeroize(shared_ee, sizeof(shared_ee));
+
+    /* <- se: MixDH(controlEphemeral, machineKey) */
+    uint8_t ck_se[32], k_se[32];
+    uint8_t shared_se[32];
+    if (tsnode_x25519_shared(shared_se, state->machine_key_priv, control_eph_pub) != 0) {
+        return TSNODE_ERR_CRYPTO;
+    }
+    noise_key_derive(ck_se, k_se, shared_se, s.ck);
+    memcpy(s.ck, ck_se, 32);
+    mbedtls_platform_zeroize(shared_se, sizeof(shared_se));
+
+    /* <- e: DecryptAndHash(tag) — empty payload */
+    uint8_t decrypted_tag[16];
+    size_t dec_len;
+    err = noise_decrypt_from(decrypted_tag, &dec_len, k_se, resp_tag, 16, s.h, 32);
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "response tag verification failed");
+        return TSNODE_ERR_CRYPTO;
+    }
+    noise_mix_hash(&s, resp_tag, 16);
+
+    /* Split: derive tx/rx keys from chaining key via HKDF-BLAKE2s.
+     * Go: hkdf.New(newBLAKE2s, nil, s.ck[:], nil) -> k1 || k2
+     * This is HKDF-Extract(salt=ck, IKM=nil) then HKDF-Expand(prk, nil, 64) */
+    uint8_t derived[64];
+    noise_split(derived, derived + 32, s.ck);
+
+    memcpy(conn->tx_key, derived, 32);
+    memcpy(conn->rx_key, derived + 32, 32);
+    conn->tx_counter = 1;
+    conn->rx_counter = 1;
+    conn->sock = sock;
+    conn->established = true;
+    conn->prebuf_len = 0;
+
+    mbedtls_platform_zeroize(&s, sizeof(s));
+    mbedtls_platform_zeroize(derived, sizeof(derived));
+
+    return TSNODE_OK;
 }

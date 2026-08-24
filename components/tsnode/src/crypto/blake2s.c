@@ -110,8 +110,10 @@ void tsnode_blake2s_init(tsnode_blake2s_ctx *ctx, size_t outlen)
     for (int i = 0; i < 8; i++) {
         ctx->h[i] = blake2s_IV[i];
     }
-    /* XOR parameter block into h[0]: digest_length | fanout<<8 | depth<<16 */
-    ctx->h[0] ^= (uint32_t)outlen | (1u << 8) | (1u << 16);
+    /* XOR parameter block into h[0]:
+     * Byte 0: digest_length, Byte 1: key_length (0),
+     * Byte 2: fanout (1), Byte 3: depth (1) */
+    ctx->h[0] ^= (uint32_t)outlen | (1u << 16) | (1u << 24);
     ctx->outlen = outlen;
 }
 
