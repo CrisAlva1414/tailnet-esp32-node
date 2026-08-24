@@ -49,7 +49,8 @@ validado primero offline contra un servidor local que usa los paquetes reales
    HEADERS/DATA HPACK literal-sin-indexing): **registro completo exitoso**.
    `RegisterResponse` legítimo (565 bytes: User/Login/NodeKeyExpired/
    MachineAuthorized/AuthURL/Error) y `MapResponse` con nodo persistido e IP
-   asignada (`<ip-tailnet>`). El nodo aparece en el admin.
+   de tailnet asignada (valor en documentación privada, ADR-0010). El nodo
+   aparece en el admin.
 
 6. **Formato de MapResponse**: body = secuencia de frames `[u32 LE length]
    [payload]` (`control/tsp/map.go`, tipo `framedReader`). El payload es

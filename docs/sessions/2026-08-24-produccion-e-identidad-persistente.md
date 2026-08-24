@@ -54,7 +54,8 @@ y dejar la identidad estable entre reinicios.
 ## Resultado
 
 - Registro en producción: `RegisterResponse` con `"MachineAuthorized":true`.
-- Nodo visible en admin con IP asignada confirmada por el usuario: **<ip-tailnet>**.
+- Nodo visible en admin con IP de tailnet asignada confirmada por el usuario
+  (valor registrado solo en documentación privada, ADR-0010).
 - Reinicio + reconexión reutiliza identidad (mismo nodo, sin nueva aprobación).
 - Tests host 15/15 PASS; build ESP-IDF limpio (-Wall -Wextra -Werror).
 
@@ -74,5 +75,5 @@ El usuario decidió **desactivar el nodo** (eliminar la aprobación desde el
 admin) hasta tener data plane: sin túnel WireGuard el dispositivo no aporta
 conectividad real y mantenerlo vivo solo agrega superficie. La identidad y
 credenciales quedan persistidas en el dispositivo; el procedimiento completo
-de reactivación quedó documentado en `docs/runbook-reactivacion.md` y linkeado
-desde el README.
+de reactivación quedó documentado en el runbook local (`docs/private/`,
+no versionado — ADR-0010).

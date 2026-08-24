@@ -45,7 +45,9 @@ El Noise handshake no completaba (tag verification fallaba). Investigación prof
 - `components/tsnode/src/crypto/base64.c/.h` — `tsnode_base64_encode()` para X-Tailscale-Handshake header.
 
 ### WiFi
-- SSID: `REDACTED-SSID`, PSK: `REDACTED-PSK`, IP: `<ip-lan>`.
+- Credenciales reales (SSID/PSK/IP) provisionadas por consola; no se registran
+  en sesiones públicas (ADR-0010). El resultado relevante es funcional:
+  asociación WPA2 + DHCP OK.
 
 ### Console
 - Comandos: `tsconnect`, `wifi set <ssid>`, `tskey set`.

@@ -48,5 +48,6 @@ del dispositivo en red.
 ## Resultado del banco
 
 Boot con credenciales persistidas → asociación WPA2 automática → DHCP:
-**IP <ip-lan>**, rssi -44, canal 6. `status` por consola confirma
+**IP LAN asignada** (valor en doc privada, ADR-0010), rssi -44, canal 6.
+`status` por consola confirma
 estado. Flash 16MB sin warnings.
