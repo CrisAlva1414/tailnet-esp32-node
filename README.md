@@ -8,8 +8,7 @@ como reimplementación selectiva — no fork, no submódulo — del enfoque de
 Tailscale SaaS — registro con Noise/ts2021 sobre HTTP/2, identidad persistente
 en NVS, nodo aprobado con IP de tailnet asignada. **Desactivado
 voluntariamente** a la espera del data plane WireGuard (el dispositivo queda
-registrado pero no responde tráfico de red). Procedimiento para volver a
-levantarlo: `docs/runbook-reactivacion.md`. Ver `docs/sessions/` para el
+registrado pero no responde tráfico de red). Ver `docs/sessions/` para el
 registro de avance y `docs/adr/` para las decisiones de arquitectura y
 seguridad, tomadas y pendientes.
 
@@ -58,6 +57,14 @@ amenaza explícito y con seguridad física y remota tratadas con igual peso.
 `AGENTS.md` es el documento operativo completo (alcance, modelo de amenaza,
 reglas de C, estructura, proceso). Cualquier agente (humano o LLM) que trabaje
 en este repo debe leerlo primero.
+
+## Política de privacidad documental
+
+Todo lo versionado es público (ADR-0010): ningún `.md`, comentario de código ni
+test contiene credenciales, IPs reales ni detalles del despliegue personal de
+quien desarrolla — esos datos viven en `docs/private/`, que está gitignoreado.
+La convención completa (placeholders y checklist) está en
+`docs/format/documentation-privacy.md`.
 
 ## Build
 

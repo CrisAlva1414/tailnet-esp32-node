@@ -172,11 +172,21 @@ vacíos llevan un `.gitkeep` si no hay contenido aún):
     ├── adr/
     │   ├── 0000-template.md
     │   └── 0001-record-architecture-decisions.md
+    ├── private/                   # NO versionado (gitignore): ops personales,
+    │                              # runbooks del despliegue propio, credenciales
+    │                              # de entorno — ver ADR-0010
     ├── sessions/
     │   └── .gitkeep                # una entrada por sesión de trabajo, ver §7
     └── format/
         └── .gitkeep                # convenciones de código/commit, ver §8
 ```
+
+**Regla transversal de privacidad documental (ADR-0010):** todo lo versionado
+es público. Ningún `.md` ni comentario de código puede contener SSIDs, PSKs,
+IPs reales (tailnet o LAN), tokens, ni detalles identificatorios del despliegue
+personal del operador — usar placeholders (`<ssid>`, `<ip-tailnet>`, etc.) y
+llevar el detalle sin sanitizar a `docs/private/`. Checklist y placeholders en
+`docs/format/documentation-privacy.md`.
 
 No se crean `main/*.c` de funcionalidad real en la sesión de inicialización.
 Inicializar = estructura + docs + build system vacío que compila un "hello world"
@@ -292,6 +302,12 @@ Si esta sesión tocó algo de §2, se explicita aquí aunque ya esté en un ADR.
 ## Pendiente / bloqueado
 Qué queda para la próxima sesión, y por qué no se cerró ahora.
 ```
+
+**Las sesiones son públicas y se escriben sanitizadas desde el origen**
+(ADR-0010): sin SSIDs, PSKs, IPs de tailnet/LAN, tokens ni datos identificatorios
+del despliegue personal — placeholders (`<ssid>`, `<ip-tailnet>`) y el detalle
+operativo sin sanitizar va a `docs/private/` (no versionada). Checklist en
+`docs/format/documentation-privacy.md`.
 
 ## 8. Formato de `docs/format/`
 

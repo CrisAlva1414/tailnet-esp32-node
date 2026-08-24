@@ -16,6 +16,9 @@ secrets.*.yaml
 .env
 .env.*
 
+# Documentación operativa personal (ADR-0010) — NUNCA se commitea
+docs/private/
+
 # Artefactos de flasheo/depuración que pueden contener volcados de memoria
 *.bin
 *.elf.map
