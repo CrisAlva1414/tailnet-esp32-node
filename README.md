@@ -4,9 +4,14 @@ Cliente Tailscale mínimo en C puro para ESP32 (ESP-IDF, sin ESPHome), construid
 como reimplementación selectiva — no fork, no submódulo — del enfoque de
 [`alfs/tailscale-iot`](https://github.com/alfs/tailscale-iot).
 
-**Estado: inicialización.** No hay todavía código de protocolo. Ver
-`docs/sessions/` para el registro de avance y `docs/adr/` para las decisiones
-de arquitectura y seguridad, tomadas y pendientes.
+**Estado:** plano de control completo y validado en hardware real contra
+Tailscale SaaS — registro con Noise/ts2021 sobre HTTP/2, identidad persistente
+en NVS, nodo aprobado con IP de tailnet asignada. **Desactivado
+voluntariamente** a la espera del data plane WireGuard (el dispositivo queda
+registrado pero no responde tráfico de red). Procedimiento para volver a
+levantarlo: `docs/runbook-reactivacion.md`. Ver `docs/sessions/` para el
+registro de avance y `docs/adr/` para las decisiones de arquitectura y
+seguridad, tomadas y pendientes.
 
 ## Qué es esto
 

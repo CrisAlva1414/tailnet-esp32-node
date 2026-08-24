@@ -67,3 +67,12 @@ y dejar la identidad estable entre reinicios.
 - Polling loop de map / reconexión (TODO explícito en `client_task`).
 - Data plane WireGuard (disco, NAT traversal) — próximo hito mayor según ADR-0008.
 - Flash encryption + Secure Boot v2 antes de cualquier despliegue fuera del banco.
+
+## Cierre de la sesión
+
+El usuario decidió **desactivar el nodo** (eliminar la aprobación desde el
+admin) hasta tener data plane: sin túnel WireGuard el dispositivo no aporta
+conectividad real y mantenerlo vivo solo agrega superficie. La identidad y
+credenciales quedan persistidas en el dispositivo; el procedimiento completo
+de reactivación quedó documentado en `docs/runbook-reactivacion.md` y linkeado
+desde el README.
