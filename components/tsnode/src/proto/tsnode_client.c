@@ -355,15 +355,24 @@ static tsnode_err_t do_connect(void)
     }
     TSNODE_LOGI(TAG, "RegisterRequest sent OK");
 
-    /* Receive RegisterResponse */
+    /* Receive RegisterResponse — skip prebuffered server frames that
+     * arrived before our RegisterRequest.  Valid RegisterResponse JSON
+     * is at least ~50 bytes; smaller frames are post-handshake noise. */
     uint8_t reg_resp[2048];
     size_t reg_resp_len;
     TSNODE_LOGI(TAG, "waiting for RegisterResponse...");
-    err = ts2021_record_recv(&s_conn, reg_resp, sizeof(reg_resp),
-                              &reg_resp_len);
-    if (err != TSNODE_OK) {
-        TSNODE_LOGE(TAG, "recv RegisterResponse failed: %d", err);
-        return err;
+    for (int attempt = 0; attempt < 10; attempt++) {
+        err = ts2021_record_recv(&s_conn, reg_resp, sizeof(reg_resp),
+                                  &reg_resp_len);
+        if (err != TSNODE_OK) {
+            TSNODE_LOGE(TAG, "recv RegisterResponse failed: %d", err);
+            return err;
+        }
+        TSNODE_LOGI(TAG, "recv frame #%d: %zu bytes plaintext", attempt, reg_resp_len);
+        if (reg_resp_len >= 20) {
+            break;  /* Likely a real RegisterResponse */
+        }
+        TSNODE_LOGW(TAG, "frame too small (%zu bytes), skipping", reg_resp_len);
     }
     reg_resp[reg_resp_len] = '\0';
 
