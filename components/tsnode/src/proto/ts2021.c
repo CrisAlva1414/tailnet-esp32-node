@@ -892,8 +892,8 @@ tsnode_err_t ts2021_handshake_complete(
 
     memcpy(conn->tx_key, derived, 32);
     memcpy(conn->rx_key, derived + 32, 32);
-    conn->tx_counter = 1;
-    conn->rx_counter = 1;
+    conn->tx_counter = 0;
+    conn->rx_counter = 0;
     conn->sock = sock;
     conn->established = true;
     conn->prebuf_len = 0;
