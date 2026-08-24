@@ -11,6 +11,7 @@
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -87,6 +88,7 @@ static void cmd_help(void)
         "  wifi set <ssid>       pide PSK sin echo, guarda y conecta\r\n"
         "  tskey set             pide auth key sin echo, valida prefijo\r\n"
         "  tsconnect             conecta a la tailnet (requiere wifi + tskey)\r\n"
+        "  tsconnectlocal <host> <port> [key]   test contra stub local\r\n"
         "  tsforget              borra identidad persistida (nodo nuevo al reconectar)\r\n"
         "  status                estado tsnode + wi-fi + IP\r\n"
         "  provision status      que credenciales hay cargadas\r\n"
@@ -233,12 +235,39 @@ static void cmd_tsconnect(void)
     tsconnect_common("controlplane.tailscale.com", 80, NULL);
 }
 
-/* TEST-ONLY: contra el server Go local (goenv/) con upgrade HTTP.
+/* TEST-ONLY: contra un server stub local (ej. goenv/) con upgrade HTTP.
+ * Host, puerto y key opcional entran por consola, nunca hardcoded (ADR-0010).
  * La auth key puede ser inválida: el stub solo loguea el request. */
-static void cmd_tsconnectlocal(void)
+static void cmd_tsconnectlocal(char *rest)
 {
-    tsconnect_common("<ip-lan>", 9999,
-                     "REDACTED-TEST-KEY");
+    char host[TSNODE_CLIENT_CTRLHOST_MAX];
+    uint16_t port = 0;
+
+    char *save = NULL;
+    char *tok = strtok_r(rest, " ", &save);
+    if (tok == NULL || strlen(tok) >= sizeof(host)) {
+        console_write("uso: tsconnectlocal <host> <port> [key-hex-64]\r\n");
+        return;
+    }
+    strncpy(host, tok, sizeof(host) - 1);
+    host[sizeof(host) - 1] = '\0';
+
+    tok = strtok_r(NULL, " ", &save);
+    if (tok == NULL) {
+        console_write("uso: tsconnectlocal <host> <port> [key-hex-64]\r\n");
+        return;
+    }
+    char *end = NULL;
+    long val = strtol(tok, &end, 10);
+    if (end == tok || *end != '\0' || val < 1 || val > 65535) {
+        console_write("puerto invalido\r\n");
+        return;
+    }
+    port = (uint16_t)val;
+
+    const char *key_hex = strtok_r(NULL, " ", &save);
+
+    tsconnect_common(host, port, key_hex);
 }
 
 static void cmd_tsforget(void)
@@ -265,8 +294,8 @@ static void dispatch(char *line)
         cmd_tsconnect();
         return;
     }
-    if (strcmp(line, "tsconnectlocal") == 0) {
-        cmd_tsconnectlocal();
+    if (strncmp(line, "tsconnectlocal ", 15) == 0) {
+        cmd_tsconnectlocal(line + 15);
         return;
     }
     if (strcmp(line, "tsforget") == 0) {
