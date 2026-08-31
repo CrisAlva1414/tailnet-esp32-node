@@ -12,6 +12,7 @@ idf_component_register(
          "src/crypto/base64.c"
          "src/crypto/hmac_blake2s.c"
          "src/wg/wg.c"
+         "src/wg/replay.c"
          "src/wg/wg_crypto_mbedtls.c"
          "src/proto/ts2021.c"
          "src/proto/h2.c"
@@ -20,5 +21,5 @@ idf_component_register(
          "src/proto/tsnode_client.c"
     INCLUDE_DIRS "include" "src/proto"
     PRIV_INCLUDE_DIRS "src" "src/port" "src/crypto" "src/wg"
-    REQUIRES esp_hw_support esp_timer mbedtls esp_netif nvs_flash
+    REQUIRES esp_hw_support esp_timer mbedtls esp_netif nvs_flash lwip
 )

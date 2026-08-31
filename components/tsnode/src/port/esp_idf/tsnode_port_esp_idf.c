@@ -103,3 +103,8 @@ void tsnode_port_task_delete_self(void)
 {
     vTaskDelete(NULL);
 }
+
+void tsnode_port_delay_ms(uint32_t ms)
+{
+    vTaskDelay(pdMS_TO_TICKS(ms));
+}

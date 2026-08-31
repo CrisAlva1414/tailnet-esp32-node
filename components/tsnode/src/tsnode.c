@@ -71,16 +71,17 @@ tsnode_err_t tsnode_init(void)
     return TSNODE_OK;
 }
 
-tsnode_err_t tsnode_start(void)
+tsnode_err_t tsnode_start(const tsnode_app_config_t *config)
 {
+    (void)config;
     if (s_state == TSNODE_STATE_STOPPED) {
         return TSNODE_ERR_NOT_INITIALIZED;
     }
     /*
-     * Bloqueado por proceso, no por falta de código: arrancar el cliente
-     * significa tocar identidad, claves y protocolo, y eso exige ADR-0002
-     * y ADR-0003 aceptados más el ADR de arquitectura de protocolo
-     * (AGENTS.md §5.1). No se implementa un atajo mientras tanto.
+     * La implementación completa está en tsnode_simple.c (app layer).
+     * Este stub existe para mantener la interfaz pública del componente.
+     * El usuario debe copiar tsnode_simple.c a su proyecto y usar esa
+     * implementación. Ver docs/QUICKSTART.md.
      */
     return TSNODE_ERR_NOT_IMPLEMENTED;
 }

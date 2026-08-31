@@ -5,6 +5,8 @@
  * permiten headers de plataforma.
  */
 
+#include <errno.h>
+#include <fcntl.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -271,5 +273,134 @@ void tsnode_port_socket_close(tsnode_port_socket_t *sock)
         mbedtls_x509_crt_free(&sock->ca_certs);
     }
     mbedtls_net_free(&sock->net);
+    free(sock);
+}
+
+/* ---- UDP socket for WireGuard data plane (ADR-0011) ---- */
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+
+struct tsnode_port_udp_socket {
+    int fd;
+};
+
+tsnode_err_t tsnode_port_udp_bind(tsnode_port_udp_socket_t **out_sock,
+                                  uint16_t port)
+{
+    if (out_sock == NULL) {
+        return TSNODE_ERR_INVALID_ARG;
+    }
+
+    tsnode_port_udp_socket_t *s = calloc(1, sizeof(*s));
+    if (s == NULL) {
+        return TSNODE_ERR_NO_MEMORY;
+    }
+
+    s->fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s->fd < 0) {
+        ESP_LOGE(TAG, "udp socket: %d", errno);
+        free(s);
+        return TSNODE_ERR_NETWORK;
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
+
+    if (bind(s->fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        ESP_LOGE(TAG, "udp bind port %u: %d", port, errno);
+        close(s->fd);
+        free(s);
+        return TSNODE_ERR_NETWORK;
+    }
+
+    /* Non-blocking for timeout-aware receive */
+    int flags = fcntl(s->fd, F_GETFL, 0);
+    fcntl(s->fd, F_SETFL, flags | O_NONBLOCK);
+
+    /* Enable broadcast (needed for WireGuard discovery) */
+    int broadcast = 1;
+    setsockopt(s->fd, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+
+    *out_sock = s;
+    return TSNODE_OK;
+}
+
+tsnode_err_t tsnode_port_udp_sendto(tsnode_port_udp_socket_t *sock,
+                                    const uint8_t *data, size_t len,
+                                    uint32_t dest_ip, uint16_t dest_port)
+{
+    if (sock == NULL || data == NULL) {
+        return TSNODE_ERR_INVALID_ARG;
+    }
+
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_addr.s_addr = htonl(dest_ip);
+    dest.sin_port = htons(dest_port);
+
+    ssize_t sent = sendto(sock->fd, data, len, 0,
+                          (struct sockaddr *)&dest, sizeof(dest));
+    if (sent < 0 || (size_t)sent != len) {
+        ESP_LOGE(TAG, "udp sendto %u.%u.%u.%u:%u: %d",
+                 (dest_ip >> 24) & 0xFF, (dest_ip >> 16) & 0xFF,
+                 (dest_ip >> 8) & 0xFF, dest_ip & 0xFF,
+                 dest_port, errno);
+        return TSNODE_ERR_NETWORK;
+    }
+    return TSNODE_OK;
+}
+
+tsnode_err_t tsnode_port_udp_recvfrom(tsnode_port_udp_socket_t *sock,
+                                      uint8_t *buf, size_t buf_size,
+                                      size_t *nread,
+                                      uint32_t *src_ip, uint16_t *src_port,
+                                      uint32_t timeout_ms)
+{
+    if (sock == NULL || buf == NULL || nread == NULL) {
+        return TSNODE_ERR_INVALID_ARG;
+    }
+
+    /* Set receive timeout via setsockopt (lwIP-compatible) */
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    setsockopt(sock->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in from;
+    socklen_t from_len = sizeof(from);
+    ssize_t got = recvfrom(sock->fd, buf, buf_size, 0,
+                           (struct sockaddr *)&from, &from_len);
+    if (got < 0) {
+        *nread = 0;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return TSNODE_ERR_TIMEOUT;
+        }
+        return TSNODE_ERR_NETWORK;
+    }
+
+    *nread = (size_t)got;
+    if (src_ip != NULL) {
+        *src_ip = ntohl(from.sin_addr.s_addr);
+    }
+    if (src_port != NULL) {
+        *src_port = ntohs(from.sin_port);
+    }
+    return TSNODE_OK;
+}
+
+void tsnode_port_udp_close(tsnode_port_udp_socket_t *sock)
+{
+    if (sock == NULL) {
+        return;
+    }
+    if (sock->fd >= 0) {
+        close(sock->fd);
+    }
     free(sock);
 }

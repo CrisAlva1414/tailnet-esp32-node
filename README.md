@@ -4,13 +4,33 @@ Cliente Tailscale mínimo en C puro para ESP32 (ESP-IDF, sin ESPHome), construid
 como reimplementación selectiva — no fork, no submódulo — del enfoque de
 [`alfs/tailscale-iot`](https://github.com/alfs/tailscale-iot).
 
-**Estado:** plano de control completo y validado en hardware real contra
-Tailscale SaaS — registro con Noise/ts2021 sobre HTTP/2, identidad persistente
-en NVS, nodo aprobado con IP de tailnet asignada. **Desactivado
-voluntariamente** a la espera del data plane WireGuard (el dispositivo queda
-registrado pero no responde tráfico de red). Ver `docs/sessions/` para el
-registro de avance y `docs/adr/` para las decisiones de arquitectura y
-seguridad, tomadas y pendientes.
+**Estado:** plano de control completo + WireGuard data plane implementado y
+testeado. API simple: importar, definir 3 variables, y el device se conecta
+a la tailnet automáticamente. Ver Quick Start más abajo.
+
+## Quick Start
+
+```c
+#include <nvs_flash.h>
+#include "tsnode.h"
+
+void app_main(void)
+{
+    nvs_flash_init();
+    tsnode_init();
+    tsnode_start(&(tsnode_app_config_t){
+        .wifi_ssid   = "MiSSID",
+        .wifi_psk    = "MiPSK",
+        .ts_auth_key = "tskey-auth-...",
+    });
+    /* listo, el device se conecta solo */
+}
+```
+
+Generá la auth key en https://login.tailscale.com/admin/settings/keys
+(recomendado: one-time, expiry 7 días, tag `tag:esp32-iot`).
+
+Ver `docs/QUICKSTART.md` para la guía completa.
 
 ## Qué es esto
 
@@ -34,6 +54,9 @@ La arquitectura interna en capas (`docs/adr/0006`) mantiene el core en C puro
 — testeable en host, portable a toda la familia — con el acceso a plataforma
 confinado a una capa port. Cada proyecto de dispositivo consume el componente
 y agrega su capa de aplicación encima.
+
+Para integrar en otro proyecto o portar a otra plataforma, ver
+`docs/INTEGRATION.md`.
 
 ## Qué NO es esto (v1)
 
@@ -68,9 +91,7 @@ La convención completa (placeholders y checklist) está en
 
 ## Build
 
-Requiere ESP-IDF instalado (ver documentación oficial de Espressif para la
-versión soportada — se fijará en `sdkconfig.defaults` y en un ADR cuando el
-target de hardware quede confirmado).
+Requiere ESP-IDF v5.5+ instalado.
 
 ```
 idf.py set-target esp32     # primario v1 (M5Stack Core 2)

@@ -52,6 +52,14 @@ tsnode_err_t tsnode_port_task_create(tsnode_port_task_fn fn, void *arg,
  */
 void tsnode_port_task_delete_self(void);
 
+/*
+ * Bloquea la tarea llamante durante ms milisegundos.
+ * Wrapper sobre la primitiva de delays de la plataforma (FreeRTOS
+ * vTaskDelay, Linux usleep, etc.). El core no incluye FreeRTOS
+ * directamente (ADR-0006).
+ */
+void tsnode_port_delay_ms(uint32_t ms);
+
 /* --- Logging (ADR-0006: sin headers de plataforma en core) --- */
 
 /* Log callback registrado por la app. level: 0=error, 1=warn, 2=info, 3=debug */
@@ -119,6 +127,45 @@ tsnode_err_t tsnode_port_socket_read(tsnode_port_socket_t *sock,
  * Cierra el socket y libia recursos. Idempotente.
  */
 void tsnode_port_socket_close(tsnode_port_socket_t *sock);
+
+/* --- Red: UDP para WireGuard data plane (ADR-0011) --- */
+
+/*
+ * Socket UDP opaco. El valor real depende de la plataforma.
+ */
+typedef struct tsnode_port_udp_socket tsnode_port_udp_socket_t;
+
+/*
+ * Bind a UDP socket to a local port. port=0 asigna un puerto efímero.
+ * out_sock recibe el socket vinculado.
+ */
+tsnode_err_t tsnode_port_udp_bind(tsnode_port_udp_socket_t **out_sock,
+                                  uint16_t port);
+
+/*
+ * Envía un datagrama UDP a dest_ip:dest_port (host byte order).
+ * Retorna TSNODE_ERR_NETWORK si el envío falla.
+ */
+tsnode_err_t tsnode_port_udp_sendto(tsnode_port_udp_socket_t *sock,
+                                    const uint8_t *data, size_t len,
+                                    uint32_t dest_ip, uint16_t dest_port);
+
+/*
+ * Recibe un datagrama UDP. Retorna en *nread cuántos bytes se recibieron.
+ * src_ip y src_port indican el origen (opcional, pueden ser NULL).
+ * timeout_ms: 0 = no bloquea, >0 = espera máxima.
+ * TSNODE_ERR_TIMEOUT si no llega nada antes del timeout.
+ */
+tsnode_err_t tsnode_port_udp_recvfrom(tsnode_port_udp_socket_t *sock,
+                                      uint8_t *buf, size_t buf_size,
+                                      size_t *nread,
+                                      uint32_t *src_ip, uint16_t *src_port,
+                                      uint32_t timeout_ms);
+
+/*
+ * Cierra el socket UDP y libia recursos. Idempotente.
+ */
+void tsnode_port_udp_close(tsnode_port_udp_socket_t *sock);
 
 /*
  * Almacenamiento persistente clave-valor de blobs binarios (ADR-0003:

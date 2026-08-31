@@ -105,6 +105,9 @@ typedef struct tsnode_wg_crypto {
     /* Fill out with len cryptographically-strong random bytes (ephemeral
      * key generation). Core stays clock/RNG-free (ADR-0008 D4). */
     tsnode_err_t (*random)(uint8_t *out, size_t len);
+    /* Secure memory zeroization. Portable alternative to
+     * mbedtls_platform_zeroize that works on any platform. */
+    void (*zeroize)(void *ptr, size_t len);
 } tsnode_wg_crypto_t;
 
 /* Production backend (mbedTLS via x25519_wrapper); host tests supply

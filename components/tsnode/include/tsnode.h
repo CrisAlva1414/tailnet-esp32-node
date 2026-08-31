@@ -5,11 +5,15 @@
  * incluyen headers de este directorio. La implementación vive en src/ y
  * puede cambiar sin aviso entre versiones 0.x.
  *
- * Capas (ADR-0006): este header no expone nada de plataforma. El ciclo de
- * vida es intencionalmente mínimo hasta que el ADR de arquitectura de
- * protocolo defina las transiciones reales; start() retorna
- * TSNODE_ERR_NOT_IMPLEMENTED mientras esos ADRs (0002/0003) no estén
- * aceptados.
+ * Uso mínimo (ver docs/QUICKSTART.md):
+ *
+ *   tsnode_app_config_t cfg = {
+ *       .wifi_ssid   = "MiSSID",
+ *       .wifi_psk    = "MiPSK",
+ *       .ts_auth_key = "tskey-auth-...",
+ *   };
+ *   tsnode_init();
+ *   tsnode_start(&cfg);
  */
 
 #ifndef TSNODE_H
@@ -25,10 +29,23 @@ extern "C" {
 #endif
 
 /*
- * Estados visibles del nodo. Es el esqueleto mínimo para que una app pueda
- * consultar estado desde el día uno; las transiciones y estados intermedios
- * de provisioning/conexión se definen con el ADR de arquitectura de
- * protocolo.
+ * Configuración de la aplicación. Solo tres campos son obligatorios.
+ * hostname, control_host y control_port tienen defaults razonables.
+ */
+typedef struct {
+    /* --- Requeridos --- */
+    const char *wifi_ssid;       /* SSID de la red WiFi (1-32 chars) */
+    const char *wifi_psk;        /* Contraseña WPA2 (8-63 chars) */
+    const char *ts_auth_key;     /* Auth key de Tailscale ("tskey-auth-...") */
+
+    /* --- Opcionales (NULL = default) --- */
+    const char *hostname;        /* NULL → "esp32-XXYYZZ" derivado de MAC */
+    const char *control_host;    /* NULL → "controlplane.tailscale.com" */
+    uint16_t    control_port;    /* 0 → 80 */
+} tsnode_app_config_t;
+
+/*
+ * Estados visibles del nodo.
  */
 typedef enum {
     TSNODE_STATE_STOPPED = 0,
@@ -44,29 +61,30 @@ const char *tsnode_state_name(tsnode_state_t state);
 /*
  * Inicializa el componente: valida configuración compile-time y deja el
  * nodo en TSNODE_STATE_INITIALIZED. No toca red ni crypto todavía.
- *
- * Contrato de concurrencia: llamar desde una única tarea (app_main o
- * equivalente). El contrato multithread se fija con el ADR de arquitectura;
- * hasta entonces no hay locking interno y así está documentado a propósito.
  */
 tsnode_err_t tsnode_init(void);
 
 /*
- * Arranca el cliente (registro/identidad/WireGuard). Requiere
- * TSNODE_STATE_INITIALIZED. Retorna TSNODE_ERR_NOT_IMPLEMENTED hasta que
- * ADR-0002 y ADR-0003 estén aceptados y exista el ADR de arquitectura de
- * protocolo.
+ * Arranca WiFi + Tailscale client con la configuración dada.
+ * Requiere: TSNODE_STATE_INITIALIZED, nvs_flash_init() ya llamado.
+ *
+ * Internamente:
+ *   1. Guarda WiFi credentials y auth key en NVS
+ *   2. Conecta WiFi (bloquea hasta conectar)
+ *   3. Deriva hostname de MAC si no se provee
+ *   4. Lanza el cliente Tailscale en background
+ *
+ * Retorna TSNODE_OK si todo arrancó correctamente.
  */
-tsnode_err_t tsnode_start(void);
+tsnode_err_t tsnode_start(const tsnode_app_config_t *config);
 
 /*
- * Detiene el cliente y libera recursos de red. Válido desde cualquier
- * estado distinto de TSNODE_STATE_STOPPED. Idempotente.
+ * Detiene el cliente y libera recursos de red.
  */
 tsnode_err_t tsnode_stop(void);
 
 /*
- * Estado actual. out_state no puede ser NULL (TSNODE_ERR_INVALID_ARG).
+ * Estado actual. out_state no puede ser NULL.
  */
 tsnode_err_t tsnode_state_get(tsnode_state_t *out_state);
 

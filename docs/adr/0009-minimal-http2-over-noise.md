@@ -1,6 +1,6 @@
 # ADR-0009: Cliente HTTP/2 mínimo sobre el túnel Noise ts2021
 
-- Estado: propuesto
+- Estado: **aceptado** (código implementado y funcionando, ver h2.c y sesión 2026-08-24)
 - Fecha: 2026-08-23
 
 ## Contexto

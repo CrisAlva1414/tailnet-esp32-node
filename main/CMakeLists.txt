@@ -4,7 +4,10 @@ idf_component_register(
          "console.c"
          "wifi_app.c"
          "prov_store.c"
+         "tsnode_simple.c"
+         "display.c"
     INCLUDE_DIRS "."
+    REQUIRES tsnode nvs_flash esp_wifi esp_event esp_netif driver
 )
 
 # -Werror es intencional y no negociable — ver AGENTS.md §4.

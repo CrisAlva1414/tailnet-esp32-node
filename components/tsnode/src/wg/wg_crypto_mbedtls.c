@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "mbedtls/chachapoly.h"
+#include "mbedtls/platform_util.h"
 #include "tsnode_port.h"
 #include "x25519_wrapper.h"
 
@@ -85,12 +86,20 @@ static tsnode_err_t backend_random(uint8_t *out, size_t len)
     return tsnode_port_random_bytes(out, len);
 }
 
+static void backend_zeroize(void *ptr, size_t len)
+{
+    if (ptr != NULL && len > 0) {
+        mbedtls_platform_zeroize(ptr, len);
+    }
+}
+
 static const tsnode_wg_crypto_t backend = {
     .dh = backend_dh,
     .pubkey = backend_pubkey,
     .aead_seal = backend_seal,
     .aead_open = backend_open,
     .random = backend_random,
+    .zeroize = backend_zeroize,
 };
 
 const tsnode_wg_crypto_t *tsnode_wg_crypto_mbedtls(void)

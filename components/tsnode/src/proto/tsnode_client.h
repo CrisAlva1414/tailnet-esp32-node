@@ -46,6 +46,9 @@ typedef struct {
     const char *auth_key;           /* tskey-auth-... */
     const char *hostname;           /* node hostname */
     uint8_t     machine_key_priv[32]; /* our machine key (or zeroed to generate) */
+    /* WireGuard UDP endpoint (IP:port) — sent in MapRequest for connectivity */
+    uint32_t    endpoint_ip;        /* host byte order, 0 = omit */
+    uint16_t    endpoint_port;      /* WG listen port, 0 = omit */
     /* TEST-ONLY: si no NULL, salta el fetch de /key y usa esta hex de 64
      * chars como control key (para apuntar al server Go local). */
     const char *control_key_hex;

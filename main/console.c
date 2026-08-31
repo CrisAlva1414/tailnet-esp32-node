@@ -11,6 +11,7 @@
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -88,6 +89,7 @@ static void cmd_help(void)
         "  wifi set <ssid>       pide PSK sin echo, guarda y conecta\r\n"
         "  tskey set             pide auth key sin echo, valida prefijo\r\n"
         "  tsconnect             conecta a la tailnet (requiere wifi + tskey)\r\n"
+        "  tsstop                detiene el cliente tailscale\r\n"
         "  tsconnectlocal <host> <port> [key]   test contra stub local\r\n"
         "  tsforget              borra identidad persistida (nodo nuevo al reconectar)\r\n"
         "  status                estado tsnode + wi-fi + IP\r\n"
@@ -209,11 +211,27 @@ static void tsconnect_common(const char *host, uint16_t port,
     snprintf(hostname, sizeof(hostname), "esp32-%02x%02x%02x",
              mac[3], mac[4], mac[5]);
 
+    /* Get WiFi IP for WireGuard endpoint */
+    char ip_buf[16] = {0};
+    wifi_app_get_ip(ip_buf, sizeof(ip_buf));
+    uint32_t endpoint_ip = 0;
+    uint16_t endpoint_port = 0;
+    if (ip_buf[0] != '\0') {
+        unsigned a, b, c, d;
+        if (sscanf(ip_buf, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+            endpoint_ip = ((uint32_t)a << 24) | ((uint32_t)b << 16) |
+                          ((uint32_t)c << 8) | (uint32_t)d;
+            endpoint_port = 51820;
+        }
+    }
+
     tsnode_client_config_t cfg = {
         .control_host = host,
         .control_port = port,
         .auth_key = auth_key,
         .hostname = hostname,
+        .endpoint_ip = endpoint_ip,
+        .endpoint_port = endpoint_port,
         .control_key_hex = control_key_hex,
     };
     memset(cfg.machine_key_priv, 0, sizeof(cfg.machine_key_priv));
@@ -276,6 +294,16 @@ static void cmd_tsforget(void)
     console_write("identidad borrada: proximo connect registra nodo nuevo\r\n");
 }
 
+static void cmd_tsstop(void)
+{
+    tsnode_err_t err = tsnode_client_stop();
+    if (err == TSNODE_OK) {
+        console_write("cliente detenido\r\n");
+    } else {
+        console_write("error deteniendo cliente\r\n");
+    }
+}
+
 static void dispatch(char *line)
 {
     if (strncmp(line, "help", 4) == 0) {
@@ -292,6 +320,10 @@ static void dispatch(char *line)
     }
     if (strcmp(line, "tsconnect") == 0) {
         cmd_tsconnect();
+        return;
+    }
+    if (strcmp(line, "tsstop") == 0) {
+        cmd_tsstop();
         return;
     }
     if (strncmp(line, "tsconnectlocal ", 15) == 0) {

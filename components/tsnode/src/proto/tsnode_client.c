@@ -18,6 +18,9 @@
 #include "tsnode_register.h"
 #include "x25519_wrapper.h"
 #include "base64.h"
+#include "wg.h"
+
+/* Port layer provides all platform abstractions (ADR-0006) */
 
 #define TAG "tsnode_client"
 
@@ -79,6 +82,7 @@ static tsnode_client_config_t s_config;
 static ts2021_conn_t s_conn;
 static uint8_t s_node_key[32];       /* WireGuard identity key (privada) */
 static uint8_t s_node_key_pub[32];   /* pública, para header ts-lb */
+static char s_node_key_pub_hex[65];  /* hex string de la pública */
 
 /* Pushback para h2_io_recv: bytes ya extraídos del record layer que son
  * del flujo HTTP/2 (SETTINGS del server cuando no hay EarlyNoise, u
@@ -91,6 +95,11 @@ static h2_conn_t s_h2;
  * crypto (mbedTLS) ya usa buena parte; 32 KB en stack es crash seguro. */
 static uint8_t s_reg_resp[REGISTER_RESPONSE_BUF_SIZE];
 static uint8_t s_map_resp[MAP_RESPONSE_BUF_SIZE];
+
+/* Forward declarations for WireGuard integration (ADR-0011) */
+static tsnode_err_t init_wg_device(void);
+static tsnode_err_t init_wg_socket(void);
+static tsnode_err_t update_wg_peers(const tsnode_map_netmap_t *netmap);
 
 /* ---- I/O callbacks para h2 sobre la capa de registros ts2021 ---- */
 
@@ -324,6 +333,23 @@ static tsnode_err_t do_connect(void)
         }
 
         save_identity(s_config.machine_key_priv, s_node_key);
+    }
+
+    /* Convert node key public to hex for headers */
+    bytes_to_hex_str(s_node_key_pub_hex, s_node_key_pub);
+
+    /* Step 2c: Initialize WireGuard device with node key (ADR-0011) */
+    err = init_wg_device();
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "WG device init failed: %d", err);
+        return err;
+    }
+
+    /* Step 2d: Bind UDP socket for WireGuard traffic (ADR-0011) */
+    err = init_wg_socket();
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "WG socket init failed: %d", err);
+        return err;
     }
 
     /* Step 3: Generate Noise initiation before TCP connect */
@@ -628,6 +654,15 @@ static tsnode_err_t do_connect(void)
     /* -1 arriba garantiza lugar para el NUL que exige el parser. */
     s_reg_resp[reg_resp_len] = '\0';
     TSNODE_LOGI(TAG, "RegisterResponse (%zu bytes)", reg_resp_len);
+    /* Debug: dump full RegisterResponse */
+    {
+        size_t chunk = 200;
+        for (size_t off = 0; off < reg_resp_len; off += chunk) {
+            size_t len = reg_resp_len - off;
+            if (len > chunk) len = chunk;
+            TSNODE_LOGI(TAG, "REG[%zu]: %.*s", off, (int)len, s_reg_resp + off);
+        }
+    }
 
     tsnode_register_response_t reg_result;
     err = tsnode_register_parse_response(&reg_result,
@@ -668,7 +703,9 @@ static tsnode_err_t do_connect(void)
                                     s_node_key_pub,
                                     zero_disco,
                                     s_config.hostname,
-                                    145, false);
+                                    145, false,
+                                    s_config.endpoint_ip,
+                                    s_config.endpoint_port);
     if (err != TSNODE_OK) {
         TSNODE_LOGE(TAG, "build MapRequest failed: %d", err);
         return err;
@@ -709,6 +746,352 @@ static tsnode_err_t do_connect(void)
     return TSNODE_OK;
 }
 
+/* ---- Map polling loop ---- */
+
+/* Intervalo base para MapRequest poll (segundos). Backoff exponencial
+ * con jitter se aplica en caso de error (ADR-0008 D3). */
+#define MAP_POLL_INTERVAL_BASE_S  30
+#define MAP_POLL_INTERVAL_MAX_S   300
+#define MAP_POLL_JITTER_PCT       20  /* ±20% jitter */
+
+/* WireGuard device and UDP socket for data plane (ADR-0011) */
+static tsnode_wg_device_t s_wg_dev;
+static tsnode_port_udp_socket_t *s_wg_sock;
+#define WG_RECV_BUF_SIZE 1500
+#define WG_RECV_QUEUE_LEN 8
+
+static tsnode_err_t init_wg_device(void)
+{
+    const tsnode_wg_crypto_t *crypto = tsnode_wg_crypto_mbedtls();
+    tsnode_err_t err = tsnode_wg_device_init(&s_wg_dev, s_node_key, crypto);
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "WG device init failed: %d", err);
+        return err;
+    }
+    TSNODE_LOGI(TAG, "WireGuard device initialized");
+    return TSNODE_OK;
+}
+
+static tsnode_err_t init_wg_socket(void)
+{
+    tsnode_err_t err = tsnode_port_udp_bind(&s_wg_sock, 51820);
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "WG UDP bind failed: %d", err);
+        return err;
+    }
+    TSNODE_LOGI(TAG, "WireGuard UDP socket bound to port 51820");
+    return TSNODE_OK;
+}
+
+static int find_peer_by_key(const uint8_t key[32])
+{
+    for (int i = 0; i < TSNODE_WG_MAX_PEERS; i++) {
+        if (s_wg_dev.peers[i].used &&
+            memcmp(s_wg_dev.peers[i].cfg.public_key, key, 32) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static tsnode_err_t update_wg_peers(const tsnode_map_netmap_t *netmap)
+{
+    tsnode_err_t err;
+
+    for (uint8_t i = 0; i < netmap->peer_count; i++) {
+        const tsnode_map_peer_t *mp = &netmap->peers[i];
+
+        /* Skip peers without endpoint (unreachable) */
+        if (mp->endpoint_port == 0 || mp->endpoint_ip[0] == '\0') {
+            continue;
+        }
+
+        int idx = find_peer_by_key(mp->key);
+        if (idx < 0) {
+            /* New peer: add to WG device */
+            tsnode_wg_peer_cfg_t cfg;
+            memset(&cfg, 0, sizeof(cfg));
+            memcpy(cfg.public_key, mp->key, 32);
+            memcpy(cfg.preshared_key, mp->preshared_key, 32);
+            cfg.allowed_ip = mp->allowed_ip;
+            cfg.allowed_mask = mp->allowed_mask;
+
+            idx = tsnode_wg_peer_add(&s_wg_dev, &cfg);
+            if (idx < 0) {
+                TSNODE_LOGW(TAG, "WG peer_add failed (full or dup?)");
+                continue;
+            }
+            TSNODE_LOGI(TAG, "WG peer added: idx=%d key=...%02x%02x", idx,
+                        mp->key[30], mp->key[31]);
+        }
+
+        /* Initiate handshake if no active session */
+        if (!tsnode_wg_peer_has_session(&s_wg_dev, idx)) {
+            uint64_t now_ms;
+            tsnode_port_uptime_ms(&now_ms);
+
+            /* TAI64N timestamp from uptime (monotonic, always increasing) */
+            uint8_t ts[12];
+            uint32_t sec = (uint32_t)(now_ms / 1000);
+            uint32_t nsec = (uint32_t)((now_ms % 1000) * 1000000);
+            ts[0] = (uint8_t)(40); /* TAI64N century: 0x40 = 2000s era */
+            ts[1] = (uint8_t)(1);
+            ts[2] = (uint8_t)(1);
+            ts[3] = (uint8_t)(1);
+            ts[4] = (uint8_t)(sec >> 24);
+            ts[5] = (uint8_t)(sec >> 16);
+            ts[6] = (uint8_t)(sec >> 8);
+            ts[7] = (uint8_t)(sec);
+            ts[8] = (uint8_t)(nsec >> 24);
+            ts[9] = (uint8_t)(nsec >> 16);
+            ts[10] = (uint8_t)(nsec >> 8);
+            ts[11] = (uint8_t)(nsec);
+
+            uint8_t initiation[TSNODE_WG_INITIATION_LEN];
+            err = tsnode_wg_create_initiation(&s_wg_dev, idx, ts, initiation);
+            if (err != TSNODE_OK) {
+                TSNODE_LOGW(TAG, "WG create_initiation failed: %d", err);
+                continue;
+            }
+
+            /* Parse endpoint IP for sendto */
+            uint32_t ep_ip = 0;
+            {
+                unsigned a, b, c, d;
+                if (sscanf(mp->endpoint_ip, "%u.%u.%u.%u",
+                           &a, &b, &c, &d) == 4) {
+                    ep_ip = ((uint32_t)a << 24) | ((uint32_t)b << 16) |
+                            ((uint32_t)c << 8) | (uint32_t)d;
+                }
+            }
+
+            err = tsnode_port_udp_sendto(s_wg_sock, initiation,
+                                          sizeof(initiation),
+                                          ep_ip, mp->endpoint_port);
+            if (err != TSNODE_OK) {
+                TSNODE_LOGW(TAG, "WG initiation send failed: %d", err);
+            } else {
+                TSNODE_LOGI(TAG, "WG initiation sent to %s:%u",
+                            mp->endpoint_ip, mp->endpoint_port);
+            }
+        }
+    }
+
+    return TSNODE_OK;
+}
+
+static tsnode_err_t do_map_poll(tsnode_map_netmap_t *netmap)
+{
+    tsnode_err_t err;
+
+    /* Build MapRequest */
+    uint8_t zero_disco[32] = {0};
+    char map_req[MAP_REQUEST_BUF_SIZE];
+    size_t map_req_len;
+    err = tsnode_map_build_request(map_req, sizeof(map_req), &map_req_len,
+                                    s_node_key_pub,
+                                    zero_disco,
+                                    s_config.hostname,
+                                    145, false,
+                                    s_config.endpoint_ip,
+                                    s_config.endpoint_port);
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "build MapRequest failed: %d", err);
+        return err;
+    }
+
+    /* POST /machine/map via h2 */
+    char lb_value[8 + 64 + 1];
+    snprintf(lb_value, sizeof(lb_value), "nodekey:%s", s_node_key_pub_hex);
+
+    size_t map_wire_len;
+    err = h2_post(&s_h2, s_config.control_host, "/machine/map",
+                  lb_value, (const uint8_t *)map_req, map_req_len,
+                  s_map_resp, sizeof(s_map_resp) - 1, &map_wire_len);
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "map POST failed: %d", err);
+        return err;
+    }
+    s_map_resp[map_wire_len] = '\0';
+    TSNODE_LOGI(TAG, "MapResponse poll (%zu bytes wire)", map_wire_len);
+
+    /* Parse framing + JSON */
+    const uint8_t *map_json = NULL;
+    size_t map_json_len = 0;
+    err = tsnode_map_parse_framed(s_map_resp, map_wire_len,
+                                   &map_json, &map_json_len);
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "parse MapResponse framing failed: %d", err);
+        return err;
+    }
+
+    err = tsnode_map_parse_response(netmap, (const char *)map_json,
+                                     map_json_len);
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "parse MapResponse failed: %d", err);
+        return err;
+    }
+
+    /* Debug: dump JSON in chunks */
+    size_t chunk_size = 150;
+    for (size_t offset = 0; offset < map_json_len; offset += chunk_size) {
+        size_t len = map_json_len - offset;
+        if (len > chunk_size) len = chunk_size;
+        TSNODE_LOGI(TAG, "JSON[%zu]: %.*s", offset, (int)len, map_json + offset);
+    }
+
+    TSNODE_LOGI(TAG, "netmap poll: %u peers, self=%s",
+                netmap->peer_count, netmap->self_ip);
+
+    /* Debug: log self node key */
+    char self_hex[65];
+    for (int i = 0; i < 32; i++) {
+        snprintf(self_hex + i * 2, 3, "%02x", netmap->self_node_key[i]);
+    }
+    TSNODE_LOGI(TAG, "self key: %s", self_hex);
+
+    /* Log first peer details if any */
+    if (netmap->peer_count > 0) {
+        for (uint8_t i = 0; i < netmap->peer_count && i < 3; i++) {
+            const tsnode_map_peer_t *p = &netmap->peers[i];
+            TSNODE_LOGI(TAG, "peer[%d]: ip=%s ep=%s:%u",
+                        i, p->tailscale_ip, p->endpoint_ip, p->endpoint_port);
+        }
+    }
+
+    return TSNODE_OK;
+}
+
+/* ---- WireGuard UDP receive task (ADR-0011) ---- */
+
+static void wg_recv_task(void *arg)
+{
+    (void)arg;
+    TSNODE_LOGI(TAG, "WG recv task started");
+
+    uint8_t pkt_buf[WG_RECV_BUF_SIZE];
+    uint8_t inner_buf[TSNODE_WG_INNER_MAX];
+
+    while (s_state == TSNODE_CLIENT_ONLINE || s_state == TSNODE_CLIENT_MAP_SYNC) {
+        size_t nread;
+        uint32_t src_ip;
+        uint16_t src_port;
+
+        tsnode_err_t err = tsnode_port_udp_recvfrom(s_wg_sock, pkt_buf,
+                                                     sizeof(pkt_buf), &nread,
+                                                     &src_ip, &src_port, 1000);
+        if (err == TSNODE_ERR_TIMEOUT) {
+            continue; /* Normal: no packet yet */
+        }
+        if (err != TSNODE_OK) {
+            TSNODE_LOGW(TAG, "WG recv error: %d", err);
+            tsnode_port_delay_ms(100);
+            continue;
+        }
+
+        if (nread < 4) {
+            continue; /* Too short for any WG message */
+        }
+
+        /* Determine message type from first byte */
+        uint8_t msg_type = pkt_buf[0];
+
+        switch (msg_type) {
+        case TSNODE_WG_MSG_TYPE_HANDSHAKE_INITIATION: {
+            TSNODE_LOGI(TAG, "WG recv initiation from %u.%u.%u.%u:%u",
+                        (src_ip >> 24) & 0xFF, (src_ip >> 16) & 0xFF,
+                        (src_ip >> 8) & 0xFF, src_ip & 0xFF, src_port);
+
+            int peer_idx = -1;
+            err = tsnode_wg_consume_initiation(&s_wg_dev, pkt_buf, nread,
+                                                &peer_idx);
+            if (err != TSNODE_OK) {
+                TSNODE_LOGW(TAG, "WG consume_initiation failed: %d", err);
+                continue;
+            }
+
+            /* Build and send response */
+            uint64_t now_ms;
+            tsnode_port_uptime_ms(&now_ms);
+            uint8_t response[TSNODE_WG_RESPONSE_LEN];
+            err = tsnode_wg_create_response(&s_wg_dev, peer_idx, now_ms,
+                                             response);
+            if (err != TSNODE_OK) {
+                TSNODE_LOGW(TAG, "WG create_response failed: %d", err);
+                continue;
+            }
+
+            err = tsnode_port_udp_sendto(s_wg_sock, response,
+                                          sizeof(response),
+                                          src_ip, src_port);
+            if (err != TSNODE_OK) {
+                TSNODE_LOGW(TAG, "WG response send failed: %d", err);
+            } else {
+                TSNODE_LOGI(TAG, "WG response sent to %u.%u.%u.%u:%u",
+                            (src_ip >> 24) & 0xFF, (src_ip >> 16) & 0xFF,
+                            (src_ip >> 8) & 0xFF, src_ip & 0xFF, src_port);
+            }
+            break;
+        }
+
+        case TSNODE_WG_MSG_TYPE_HANDSHAKE_RESPONSE: {
+            TSNODE_LOGI(TAG, "WG recv response from %u.%u.%u.%u:%u",
+                        (src_ip >> 24) & 0xFF, (src_ip >> 16) & 0xFF,
+                        (src_ip >> 8) & 0xFF, src_ip & 0xFF, src_port);
+
+            int peer_idx = -1;
+            uint64_t now_ms;
+            tsnode_port_uptime_ms(&now_ms);
+            err = tsnode_wg_consume_response(&s_wg_dev, pkt_buf, nread,
+                                              now_ms, &peer_idx);
+            if (err != TSNODE_OK) {
+                TSNODE_LOGW(TAG, "WG consume_response failed: %d", err);
+                continue;
+            }
+            TSNODE_LOGI(TAG, "WG session established with peer %d", peer_idx);
+            break;
+        }
+
+        case TSNODE_WG_MSG_TYPE_TRANSPORT_DATA: {
+            int peer_idx = -1;
+            size_t inner_len = 0;
+            err = tsnode_wg_decap(&s_wg_dev, pkt_buf, nread,
+                                   inner_buf, sizeof(inner_buf), &inner_len,
+                                   &peer_idx);
+            if (err == TSNODE_ERR_REPLAY) {
+                /* Replay duplicate — silently drop */
+                continue;
+            }
+            if (err != TSNODE_OK) {
+                TSNODE_LOGW(TAG, "WG decap failed: %d", err);
+                continue;
+            }
+
+            if (inner_len == 0) {
+                /* Keepalive (empty payload) */
+                TSNODE_LOGI(TAG, "WG keepalive from peer %d", peer_idx);
+            } else {
+                /* Inner IP packet — for v1, log and drop (no TUN) */
+                TSNODE_LOGI(TAG, "WG data from peer %d: %zu bytes (no TUN yet)",
+                            peer_idx, inner_len);
+            }
+            break;
+        }
+
+        default:
+            /* Unknown WG message type */
+            TSNODE_LOGW(TAG, "WG unknown msg type %u from %u.%u.%u.%u:%u",
+                        msg_type,
+                        (src_ip >> 24) & 0xFF, (src_ip >> 16) & 0xFF,
+                        (src_ip >> 8) & 0xFF, src_ip & 0xFF, src_port);
+            break;
+        }
+    }
+
+    TSNODE_LOGI(TAG, "WG recv task exiting");
+    tsnode_port_task_delete_self();
+}
+
 /* ---- Task entry point (called by port task) ---- */
 
 static void client_task(void *arg)
@@ -721,13 +1104,76 @@ static void client_task(void *arg)
         TSNODE_LOGE(TAG, "connect failed: %s (%d)",
                     tsnode_err_name(err), err);
         set_state(TSNODE_CLIENT_ERROR);
-    } else {
-        /* Ciclo one-shot completo: marcar DONE para que un próximo
-         * start() sea válido (la tarea ya se va a borrar). */
-        set_state(TSNODE_CLIENT_DONE);
+        tsnode_port_task_delete_self();
+        return;
     }
 
-    /* TODO: map polling loop, reconnection logic */
+    /* Start WireGuard UDP receive task (ADR-0011) */
+    err = tsnode_port_task_create(wg_recv_task, NULL,
+                                   "wg_recv", 8192, 4);
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "WG recv task create failed: %d", err);
+        /* Non-fatal: data plane won't work but control plane is fine */
+    }
+
+    /* Connected and registered. Enter polling loop. */
+    uint32_t poll_interval_s = MAP_POLL_INTERVAL_BASE_S;
+    uint32_t consecutive_errors = 0;
+
+    while (s_state == TSNODE_CLIENT_ONLINE) {
+        /* Sleep with jitter */
+        uint32_t jitter = (poll_interval_s * MAP_POLL_JITTER_PCT) / 100;
+        uint32_t sleep_s = poll_interval_s;
+        if (jitter > 0) {
+            /* Simple pseudo-jitter: add/subtract based on uptime */
+            uint64_t uptime_ms;
+            tsnode_port_uptime_ms(&uptime_ms);
+            uint32_t tick = (uint32_t)(uptime_ms / 1000);
+            if ((tick % 100) < 50) {
+                sleep_s += (tick % jitter);
+            } else {
+                sleep_s -= (tick % jitter);
+            }
+        }
+        /* Delay using port layer */
+        tsnode_port_delay_ms(sleep_s * 1000);
+
+        /* Check if we should stop */
+        if (s_state != TSNODE_CLIENT_ONLINE) break;
+
+        /* Poll map */
+        tsnode_map_netmap_t netmap;
+        tsnode_err_t poll_err = do_map_poll(&netmap);
+        if (poll_err != TSNODE_OK) {
+            consecutive_errors++;
+            poll_interval_s = MAP_POLL_INTERVAL_BASE_S * (1 << (consecutive_errors < 5 ? consecutive_errors : 5));
+            if (poll_interval_s > MAP_POLL_INTERVAL_MAX_S) {
+                poll_interval_s = MAP_POLL_INTERVAL_MAX_S;
+            }
+            TSNODE_LOGW(TAG, "map poll error, backoff to %us", poll_interval_s);
+
+            /* Too many errors: try to reconnect */
+            if (consecutive_errors >= 3) {
+                TSNODE_LOGE(TAG, "too many map errors, reconnecting");
+                ts2021_conn_close(&s_conn);
+                set_state(TSNODE_CLIENT_ERROR);
+                break;
+            }
+            continue;
+        }
+
+        /* Success: reset backoff */
+        consecutive_errors = 0;
+        poll_interval_s = MAP_POLL_INTERVAL_BASE_S;
+
+        /* Update WireGuard peers from netmap (ADR-0011) */
+        tsnode_err_t wg_err = update_wg_peers(&netmap);
+        if (wg_err != TSNODE_OK) {
+            TSNODE_LOGW(TAG, "WG peer update failed: %d", wg_err);
+        }
+    }
+
+    TSNODE_LOGI(TAG, "client task exiting (state=%d)", (int)s_state);
 
     /* Task self-deletes via port (ADR-0006) */
     tsnode_port_task_delete_self();
@@ -803,6 +1249,13 @@ tsnode_err_t tsnode_client_start(const tsnode_client_config_t *config)
 tsnode_err_t tsnode_client_stop(void)
 {
     ts2021_conn_close(&s_conn);
+
+    /* Close WireGuard UDP socket if open */
+    if (s_wg_sock != NULL) {
+        tsnode_port_udp_close(s_wg_sock);
+        s_wg_sock = NULL;
+    }
+
     set_state(TSNODE_CLIENT_IDLE);
     return TSNODE_OK;
 }

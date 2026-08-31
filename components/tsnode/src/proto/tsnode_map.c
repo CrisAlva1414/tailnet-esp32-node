@@ -47,7 +47,9 @@ tsnode_err_t tsnode_map_build_request(char *buf, size_t buf_size,
                                       const uint8_t disco_key[32],
                                       const char *hostname,
                                       uint32_t capability_version,
-                                      bool stream)
+                                      bool stream,
+                                      uint32_t endpoint_ip,
+                                      uint16_t endpoint_port)
 {
     if (buf == NULL || buf_size == 0 || out_len == NULL || node_key_pub == NULL) {
         return TSNODE_ERR_INVALID_ARG;
@@ -91,7 +93,22 @@ tsnode_err_t tsnode_map_build_request(char *buf, size_t buf_size,
     if (hostname != NULL && hostname[0] != '\0') {
         buf[pos++] = ',';
         n = snprintf(buf + pos, buf_size - pos,
-                     "\"Hostinfo\":{\"Hostname\":\"%s\"}", hostname);
+                     "\"Hostinfo\":{\"OS\":\"linux\",\"Hostname\":\"%s\"}",
+                     hostname);
+        if (n < 0 || (size_t)n >= buf_size - pos) return TSNODE_ERR_NO_MEMORY;
+        pos += n;
+    }
+
+    /* Endpoints: WireGuard UDP endpoint (IP:port) */
+    if (endpoint_ip != 0 && endpoint_port != 0) {
+        buf[pos++] = ',';
+        n = snprintf(buf + pos, buf_size - pos,
+                     "\"Endpoints\":[\"%lu.%lu.%lu.%lu:%u\"]",
+                     (unsigned long)((endpoint_ip >> 24) & 0xFF),
+                     (unsigned long)((endpoint_ip >> 16) & 0xFF),
+                     (unsigned long)((endpoint_ip >> 8) & 0xFF),
+                     (unsigned long)(endpoint_ip & 0xFF),
+                     (unsigned)endpoint_port);
         if (n < 0 || (size_t)n >= buf_size - pos) return TSNODE_ERR_NO_MEMORY;
         pos += n;
     }
@@ -250,36 +267,71 @@ tsnode_err_t tsnode_map_parse_response(tsnode_map_netmap_t *netmap,
             find_json_string(peer_start, "Hostname",
                             peer->host_name, sizeof(peer->host_name));
 
-            /* Find AllowedIPs — look for "100." inside AllowedIPs array */
+            /* Find AllowedIPs — parse first CIDR entry (e.g. "100.64.0.1/32") */
             const char *allowed = strstr(peer_start, "\"AllowedIPs\"");
             if (allowed != NULL) {
                 const char *ip = strstr(allowed, "\"100.");
                 if (ip != NULL) {
                     ip++; /* skip quote */
-                    size_t iplen = 0;
-                    while (*ip && *ip != '"' && *ip != '/' &&
-                           iplen < sizeof(peer->tailscale_ip) - 1) {
-                        peer->tailscale_ip[iplen++] = *ip++;
+                    /* Parse dotted-decimal IP */
+                    uint32_t a = 0, b = 0, c = 0, d = 0;
+                    int slash_pos = 0;
+                    int parsed = sscanf(ip, "%" SCNu32 ".%" SCNu32 ".%" SCNu32 ".%" SCNu32 "/%d",
+                                        &a, &b, &c, &d, &slash_pos);
+                    if (parsed >= 4) {
+                        peer->allowed_ip = (a << 24) | (b << 16) | (c << 8) | d;
+                        /* Convert IP to string for display */
+                        snprintf(peer->tailscale_ip, sizeof(peer->tailscale_ip),
+                                 "%u.%u.%u.%u", (unsigned)a, (unsigned)b,
+                                 (unsigned)c, (unsigned)d);
+                        /* CIDR to mask: /32 -> 0xFFFFFFFF, /24 -> 0xFFFFFF00, etc. */
+                        if (parsed == 5 && slash_pos >= 0 && slash_pos <= 32) {
+                            peer->allowed_mask = (slash_pos == 0) ? 0u :
+                                (UINT32_MAX << (32 - (uint32_t)slash_pos));
+                        } else {
+                            peer->allowed_mask = UINT32_MAX; /* default /32 */
+                        }
                     }
-                    peer->tailscale_ip[iplen] = '\0';
                 }
             }
 
-            /* Find Endpoints */
+            /* Find Endpoints — extract IP:port from first entry */
             const char *ep = strstr(peer_start, "\"Endpoints\"");
             if (ep != NULL) {
-                /* Extract port from first endpoint string */
                 const char *ep_str = strchr(ep, '"');
                 if (ep_str != NULL) {
-                    ep_str++;
-                    const char *colon = strchr(ep_str, ':');
-                    if (colon != NULL) {
-                        peer->listen_port = (uint16_t)atoi(colon + 1);
+                    ep_str++; /* skip opening quote */
+                    /* Copy IP until colon */
+                    size_t iplen = 0;
+                    while (*ep_str && *ep_str != ':' &&
+                           iplen < sizeof(peer->endpoint_ip) - 1) {
+                        peer->endpoint_ip[iplen++] = *ep_str++;
+                    }
+                    peer->endpoint_ip[iplen] = '\0';
+                    /* Parse port after colon */
+                    if (*ep_str == ':') {
+                        peer->endpoint_port = (uint16_t)atoi(ep_str + 1);
+                    }
+                    /* listen_port defaults to endpoint_port */
+                    peer->listen_port = peer->endpoint_port;
+                }
+            }
+
+            /* Find PresharedKey — hex-encoded 32-byte key */
+            const char *psk = strstr(peer_start, "\"PresharedKey\"");
+            if (psk != NULL) {
+                const char *psk_hex = strchr(psk, '"');
+                if (psk_hex != NULL) {
+                    psk_hex++; /* skip quote */
+                    /* Check for "key:" prefix (Tailscale uses "key:hex") */
+                    if (strncmp(psk_hex, "key:", 4) == 0) psk_hex += 4;
+                    if (strlen(psk_hex) >= 64) {
+                        hex_to_bytes(peer->preshared_key, 32, psk_hex, 64);
                     }
                 }
             }
 
-            peer->online = (peer->listen_port > 0);
+            peer->online = (peer->endpoint_port > 0);
             netmap->peer_count++;
 
             /* Move past this peer object */
