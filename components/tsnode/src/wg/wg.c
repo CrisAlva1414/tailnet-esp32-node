@@ -410,9 +410,11 @@ tsnode_err_t tsnode_wg_create_initiation(
 
     local_index = alloc_index(dev);
     if (local_index == 0) {
+        TSNODE_LOGE(TAG, "WG init: alloc_index failed");
         hs_clear_secrets(peer);
         return TSNODE_ERR_INVALID_STATE;
     }
+    TSNODE_LOGI(TAG, "WG init: crypto OK, index=%lu", (unsigned long)local_index);
 
     /* Serialize fixed fields first; crypto below writes ciphertext in
      * place and mixes it into the transcript as it goes. */

@@ -9,10 +9,13 @@
 
 #include <string.h>
 
+#include "esp_log.h"
 #include "esp_random.h"
 #include "mbedtls/ecp.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/platform_util.h"
+
+#define TAG "x25519"
 
 /* ESP-IDF entropy source for mbedTLS DRBG */
 static int esp_entropy_func(void *ctx, unsigned char *buf, size_t len)
@@ -101,17 +104,33 @@ int tsnode_x25519_publickey(const uint8_t priv[32], uint8_t pub_out[32])
     ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
     if (ret != 0) goto cleanup;
 
-    ret = mbedtls_mpi_read_binary_le(&d, priv, 32);
+    /* Clamp per RFC 7748 §5: needed when raw random bytes are used
+     * as private key (e.g. WG ephemeral). Keys from mbedtls_ecp_gen_keypair
+     * are already clamped, so this is a no-op for them. */
+    uint8_t clamped[32];
+    memcpy(clamped, priv, 32);
+    clamped[0] &= 248;
+    clamped[31] &= 127;
+    clamped[31] |= 64;
+
+    ret = mbedtls_mpi_read_binary_le(&d, clamped, 32);
     if (ret != 0) goto cleanup;
 
+    if (ensure_rng() != 0) { ret = -1; goto cleanup; }
     ret = mbedtls_ecp_mul(&grp, &Q, &d, &grp.G,
                            mbedtls_ctr_drbg_random, &s_ctr_drbg);
-    if (ret != 0) goto cleanup;
+    if (ret != 0) {
+        ESP_LOGE(TAG, "ecp_mul pubkey failed: -0x%04x", -ret);
+        goto cleanup;
+    }
 
     size_t olen;
     ret = mbedtls_ecp_point_write_binary(&grp, &Q,
                                           MBEDTLS_ECP_PF_COMPRESSED,
                                           &olen, pub_out, 32);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "point_write_binary failed: -0x%04x", -ret);
+    }
 
 cleanup:
     mbedtls_ecp_group_free(&grp);
@@ -131,20 +150,19 @@ int tsnode_x25519_shared(uint8_t shared[32], const uint8_t priv[32],
     mbedtls_ecp_point Q;
     mbedtls_ecp_point R;
     mbedtls_mpi d;
-    mbedtls_mpi r;
     int ret;
 
     mbedtls_ecp_group_init(&grp);
     mbedtls_ecp_point_init(&Q);
     mbedtls_ecp_point_init(&R);
     mbedtls_mpi_init(&d);
-    mbedtls_mpi_init(&r);
 
     /* Setup Curve25519 group */
     ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
     if (ret != 0) goto cleanup;
 
-    /* Import private key from little-endian bytes */
+    /* Import private key from little-endian bytes (already clamped by
+     * mbedTLS or by caller) */
     ret = mbedtls_mpi_read_binary_le(&d, priv, 32);
     if (ret != 0) goto cleanup;
 
@@ -156,7 +174,8 @@ int tsnode_x25519_shared(uint8_t shared[32], const uint8_t priv[32],
     ret = mbedtls_ecp_check_pubkey(&grp, &Q);
     if (ret != 0) goto cleanup;
 
-    /* Scalar multiplication: R = d * Q */
+    /* Scalar multiplication: R = d * Q.
+     * mbedTLS requires RNG for Curve25519 randomization. */
     if (ensure_rng() != 0) { ret = -1; goto cleanup; }
     ret = mbedtls_ecp_mul(&grp, &R, &d, &Q, mbedtls_ctr_drbg_random, &s_ctr_drbg);
     if (ret != 0) goto cleanup;
@@ -179,6 +198,5 @@ cleanup:
     mbedtls_ecp_point_free(&Q);
     mbedtls_ecp_point_free(&R);
     mbedtls_mpi_free(&d);
-    mbedtls_mpi_free(&r);
     return (ret == 0) ? 0 : -1;
 }

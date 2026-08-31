@@ -590,11 +590,13 @@ tsnode_err_t ts2021_handshake_initiate(
         TSNODE_LOGE(TAG, "random_bytes failed: %d", err);
         return err;
     }
+    TSNODE_LOGI(TAG, "Noise: random OK");
 
     if (tsnode_x25519_keygen(eph_priv, eph_pub) != 0) {
         TSNODE_LOGE(TAG, "x25519_keygen failed");
         return TSNODE_ERR_CRYPTO;
     }
+    TSNODE_LOGI(TAG, "Noise: keygen OK");
 
     /* Get our machine public key from private */
     int pk_ret = tsnode_x25519_publickey(machine_key_priv, machine_key_pub);
@@ -602,6 +604,7 @@ tsnode_err_t ts2021_handshake_initiate(
         TSNODE_LOGE(TAG, "x25519_publickey failed: %d", pk_ret);
         return TSNODE_ERR_CRYPTO;
     }
+    TSNODE_LOGI(TAG, "Noise: pubkey OK");
 
     /* Initialize symmetric state: h = ck = Hash(protocolName) */
     noise_sym_init(&s);
@@ -626,9 +629,10 @@ tsnode_err_t ts2021_handshake_initiate(
     uint8_t ck_new[32], k_es[32];
     uint8_t shared_es[32];
     if (tsnode_x25519_shared(shared_es, eph_priv, control_key_pub) != 0) {
-        TSNODE_LOGE(TAG, "x25519_shared es failed");
+        TSNODE_LOGE(TAG, "Noise: DH es failed");
         return TSNODE_ERR_CRYPTO;
     }
+    TSNODE_LOGI(TAG, "Noise: DH es OK");
     noise_key_derive(ck_new, k_es, shared_es, s.ck);
     memcpy(s.ck, ck_new, 32);
     mbedtls_platform_zeroize(shared_es, sizeof(shared_es));
@@ -638,16 +642,21 @@ tsnode_err_t ts2021_handshake_initiate(
     size_t enc_len;
     err = noise_encrypt_to(enc_machine_pub, &enc_len, k_es,
                            machine_key_pub, 32, s.h, 32);
-    if (err != TSNODE_OK) return err;
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "Noise: AEAD s failed: %d", err);
+        return err;
+    }
+    TSNODE_LOGI(TAG, "Noise: AEAD s OK");
     noise_mix_hash(&s, enc_machine_pub, enc_len);
 
     /* -> ss: MixDH(machineKey, serverKey) */
     uint8_t ck_new2[32], k_ss[32];
     uint8_t shared_ss[32];
     if (tsnode_x25519_shared(shared_ss, machine_key_priv, control_key_pub) != 0) {
-        TSNODE_LOGE(TAG, "x25519_shared ss failed");
+        TSNODE_LOGE(TAG, "Noise: DH ss failed");
         return TSNODE_ERR_CRYPTO;
     }
+    TSNODE_LOGI(TAG, "Noise: DH ss OK");
     noise_key_derive(ck_new2, k_ss, shared_ss, s.ck);
     memcpy(s.ck, ck_new2, 32);
     mbedtls_platform_zeroize(shared_ss, sizeof(shared_ss));
@@ -656,7 +665,11 @@ tsnode_err_t ts2021_handshake_initiate(
     uint8_t tag_ss[16];
     size_t tag_ss_len;
     err = noise_encrypt_to(tag_ss, &tag_ss_len, k_ss, NULL, 0, s.h, 32);
-    if (err != TSNODE_OK) return err;
+    if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "Noise: AEAD ss failed: %d", err);
+        return err;
+    }
+    TSNODE_LOGI(TAG, "Noise: AEAD ss OK");
     noise_mix_hash(&s, tag_ss, tag_ss_len);
 
     /* Assemble initiation message (101 bytes) */
