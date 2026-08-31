@@ -19,9 +19,17 @@
 
 #include "../crypto/blake2s.h"
 #include "../crypto/hmac_blake2s.h"
-#include "tsnode_port.h"
 
+/* Port layer logging (not available in host tests) */
+#if __has_include("tsnode_port.h")
+#include "tsnode_port.h"
 #define TAG "wg"
+#else
+/* Host-test stub: variadic macros that accept zero or more args */
+#define TSNODE_LOGE(tag, ...) ((void)0)
+#define TSNODE_LOGI(tag, ...) ((void)0)
+#define TSNODE_LOGW(tag, ...) ((void)0)
+#endif
 
 /* ---- Compile-time layout assertions (fail the build if constants
  * drift from the wire format — cheap insurance per AGENTS.md §5.6) ---- */
@@ -391,13 +399,10 @@ tsnode_err_t tsnode_wg_create_initiation(
     /* Fresh ephemeral; on any failure abort without staging state —
      * an ephemeral must never be reused across attempts. */
     hs_clear_secrets(peer);
-    if (cr->random(peer->hs_local_eph_priv, TSNODE_WG_KEY_LEN) != TSNODE_OK) {
-        TSNODE_LOGE(TAG, "WG init: random failed");
-        hs_clear_secrets(peer);
-        return TSNODE_ERR_CRYPTO;
-    }
-    if (cr->pubkey(eph_pub, peer->hs_local_eph_priv) != TSNODE_OK) {
-        TSNODE_LOGE(TAG, "WG init: pubkey derive failed");
+    /* Use keygen instead of random()+pubkey() to guarantee the key pair
+     * passes mbedTLS validation (RFC 7748 clamping + bit 254 set). */
+    if (cr->keygen(peer->hs_local_eph_priv, eph_pub) != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "WG init: keygen failed");
         hs_clear_secrets(peer);
         return TSNODE_ERR_CRYPTO;
     }

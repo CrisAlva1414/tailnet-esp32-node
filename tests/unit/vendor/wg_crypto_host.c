@@ -76,6 +76,19 @@ static tsnode_err_t host_random(uint8_t *out, size_t len)
     return TSNODE_OK;
 }
 
+static tsnode_err_t host_keygen(uint8_t priv[32], uint8_t pub[32])
+{
+    /* Generate random key then derive public key via TweetNaCl */
+    lcg_fill(priv, 32);
+    crypto_scalarmult_curve25519_base(pub, priv);
+    return TSNODE_OK;
+}
+
+static void host_zeroize(void *ptr, size_t len)
+{
+    memset(ptr, 0, len);
+}
+
 const tsnode_wg_crypto_t *tsnode_wg_crypto_host(void)
 {
     static const tsnode_wg_crypto_t host_backend = {
@@ -84,6 +97,8 @@ const tsnode_wg_crypto_t *tsnode_wg_crypto_host(void)
         .aead_seal = host_seal,
         .aead_open = host_open,
         .random = host_random,
+        .keygen = host_keygen,
+        .zeroize = host_zeroize,
     };
     return &host_backend;
 }

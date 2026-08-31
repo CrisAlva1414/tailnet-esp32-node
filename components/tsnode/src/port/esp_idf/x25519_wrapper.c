@@ -104,17 +104,19 @@ int tsnode_x25519_publickey(const uint8_t priv[32], uint8_t pub_out[32])
     ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
     if (ret != 0) goto cleanup;
 
-    /* Clamp per RFC 7748 §5: needed when raw random bytes are used
-     * as private key (e.g. WG ephemeral). Keys from mbedtls_ecp_gen_keypair
-     * are already clamped, so this is a no-op for them. */
-    uint8_t clamped[32];
-    memcpy(clamped, priv, 32);
-    clamped[0] &= 248;
-    clamped[31] &= 127;
-    clamped[31] |= 64;
-
-    ret = mbedtls_mpi_read_binary_le(&d, clamped, 32);
+    /* Load key as little-endian (RFC 7748 wire format) */
+    ret = mbedtls_mpi_read_binary_le(&d, priv, 32);
     if (ret != 0) goto cleanup;
+
+    /* Clamp per RFC 7748 §5 via MPI operations.
+     * Byte-level clamping alone is insufficient because mbedTLS
+     * validates bitlen(d)-1 == 254, which requires bit 254 to be
+     * explicitly set. We do all clamping at the MPI level to guarantee
+     * the key passes mbedtls_ecp_check_privkey(). */
+    mbedtls_mpi_set_bit(&d, 0, 0);   /* clear bit 0 */
+    mbedtls_mpi_set_bit(&d, 1, 0);   /* clear bit 1 */
+    mbedtls_mpi_set_bit(&d, 2, 0);   /* clear bit 2 (cofactor clearing) */
+    mbedtls_mpi_set_bit(&d, 254, 1); /* ensure bit 254 is set */
 
     if (ensure_rng() != 0) { ret = -1; goto cleanup; }
     ret = mbedtls_ecp_mul(&grp, &Q, &d, &grp.G,

@@ -105,6 +105,10 @@ typedef struct tsnode_wg_crypto {
     /* Fill out with len cryptographically-strong random bytes (ephemeral
      * key generation). Core stays clock/RNG-free (ADR-0008 D4). */
     tsnode_err_t (*random)(uint8_t *out, size_t len);
+    /* Generate a valid X25519 keypair. The private key is clamped per
+     * RFC 7748 §5 and passes mbedTLS validation. Use this instead of
+     * random()+pubkey() for ephemeral key generation. */
+    tsnode_err_t (*keygen)(uint8_t priv[32], uint8_t pub[32]);
     /* Secure memory zeroization. Portable alternative to
      * mbedtls_platform_zeroize that works on any platform. */
     void (*zeroize)(void *ptr, size_t len);

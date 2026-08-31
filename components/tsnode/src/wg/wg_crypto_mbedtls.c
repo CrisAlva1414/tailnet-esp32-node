@@ -86,6 +86,14 @@ static tsnode_err_t backend_random(uint8_t *out, size_t len)
     return tsnode_port_random_bytes(out, len);
 }
 
+static tsnode_err_t backend_keygen(uint8_t priv[32], uint8_t pub[32])
+{
+    if (tsnode_x25519_keygen(priv, pub) != 0) {
+        return TSNODE_ERR_CRYPTO;
+    }
+    return TSNODE_OK;
+}
+
 static void backend_zeroize(void *ptr, size_t len)
 {
     if (ptr != NULL && len > 0) {
@@ -99,6 +107,7 @@ static const tsnode_wg_crypto_t backend = {
     .aead_seal = backend_seal,
     .aead_open = backend_open,
     .random = backend_random,
+    .keygen = backend_keygen,
     .zeroize = backend_zeroize,
 };
 
