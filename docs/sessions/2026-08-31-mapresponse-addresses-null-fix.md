@@ -57,11 +57,10 @@ Se hizo un análisis cruzado entre:
 
 - **Parser self IP**: el `100.x.x.x` del nodo propio no se extrae correctamente
 - **Parser peer endpoints**: ✅ FIXED — ahora muestra `201.188.181.63:44004`
-- **WG initiation falla con error 6 (CRYPTO)** — necesita investigación en próximo sprint
-  - Peer endpoint correctamente parseado: `201.188.181.63:44004`
-  - Peer IP: `100.75.129.85`
-  - El error ocurre en `tsnode_wg_create_initiation()` —可能是 DH o AEAD
-  - Logging de debug agregado pero no visible (streaming frames consumen output serial)
-- **Data plane WG end-to-end**: handshake + encap/decap con el peer NAS
-- **ts2021.c refactor**: crypto vtable para portability completa
-- **Flash encryption**: antes de producción
+- **WG initiation**: ✅ FIXED — ahora funciona con `cr->keygen()` (Curve25519 clamping via `mbedtls_ecp_gen_keypair`)
+- **Noise handshake**: ✅ FULLY WORKING — todos los pasos OK
+- **WG initiation sent**: ✅ `148 bytes → 201.188.181.63:44004`
+- **Map polling**: falla después de la primera respuesta (auth key consumida)
+- **WG response + session**: pendiente — necesita auth key válida y peers online
+- **ts2021.c refactor**: deferred
+- **Flash encryption**: deferred
