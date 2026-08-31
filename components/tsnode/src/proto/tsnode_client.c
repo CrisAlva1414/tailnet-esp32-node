@@ -848,11 +848,13 @@ static tsnode_err_t update_wg_peers(const tsnode_map_netmap_t *netmap)
             ts[11] = (uint8_t)(nsec);
 
             uint8_t initiation[TSNODE_WG_INITIATION_LEN];
+            TSNODE_LOGI(TAG, "WG creating initiation for peer %d (key=%02x%02x)", idx, mp->key[30], mp->key[31]);
             err = tsnode_wg_create_initiation(&s_wg_dev, idx, ts, initiation);
             if (err != TSNODE_OK) {
-                TSNODE_LOGW(TAG, "WG create_initiation failed: %d", err);
+                TSNODE_LOGE(TAG, "WG create_initiation failed: %d (peer %d)", err, idx);
                 continue;
             }
+            TSNODE_LOGI(TAG, "WG initiation created OK (%d bytes)", TSNODE_WG_INITIATION_LEN);
 
             /* Parse endpoint IP for sendto */
             uint32_t ep_ip = 0;

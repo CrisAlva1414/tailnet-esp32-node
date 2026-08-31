@@ -295,25 +295,29 @@ tsnode_err_t tsnode_map_parse_response(tsnode_map_netmap_t *netmap,
                 }
             }
 
-            /* Find Endpoints — extract IP:port from first entry */
+            /* Find Endpoints — format: "Endpoints":["ip:port",...] */
             const char *ep = strstr(peer_start, "\"Endpoints\"");
             if (ep != NULL) {
-                const char *ep_str = strchr(ep, '"');
-                if (ep_str != NULL) {
-                    ep_str++; /* skip opening quote */
-                    /* Copy IP until colon */
-                    size_t iplen = 0;
-                    while (*ep_str && *ep_str != ':' &&
-                           iplen < sizeof(peer->endpoint_ip) - 1) {
-                        peer->endpoint_ip[iplen++] = *ep_str++;
+                /* Find opening bracket [ */
+                const char *bracket = strchr(ep + 12, '[');
+                if (bracket != NULL) {
+                    /* Find first quoted string after [ */
+                    const char *ep_str = strchr(bracket + 1, '"');
+                    if (ep_str != NULL) {
+                        ep_str++; /* skip opening quote */
+                        /* Copy IP until colon */
+                        size_t iplen = 0;
+                        while (*ep_str && *ep_str != ':' &&
+                               iplen < sizeof(peer->endpoint_ip) - 1) {
+                            peer->endpoint_ip[iplen++] = *ep_str++;
+                        }
+                        peer->endpoint_ip[iplen] = '\0';
+                        /* Parse port after colon */
+                        if (*ep_str == ':') {
+                            peer->endpoint_port = (uint16_t)atoi(ep_str + 1);
+                        }
+                        peer->listen_port = peer->endpoint_port;
                     }
-                    peer->endpoint_ip[iplen] = '\0';
-                    /* Parse port after colon */
-                    if (*ep_str == ':') {
-                        peer->endpoint_port = (uint16_t)atoi(ep_str + 1);
-                    }
-                    /* listen_port defaults to endpoint_port */
-                    peer->listen_port = peer->endpoint_port;
                 }
             }
 

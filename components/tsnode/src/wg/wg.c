@@ -19,6 +19,9 @@
 
 #include "../crypto/blake2s.h"
 #include "../crypto/hmac_blake2s.h"
+#include "tsnode_port.h"
+
+#define TAG "wg"
 
 /* ---- Compile-time layout assertions (fail the build if constants
  * drift from the wire format — cheap insurance per AGENTS.md §5.6) ---- */
@@ -388,10 +391,19 @@ tsnode_err_t tsnode_wg_create_initiation(
     /* Fresh ephemeral; on any failure abort without staging state —
      * an ephemeral must never be reused across attempts. */
     hs_clear_secrets(peer);
-    if (cr->random(peer->hs_local_eph_priv, TSNODE_WG_KEY_LEN) != TSNODE_OK ||
-        cr->pubkey(eph_pub, peer->hs_local_eph_priv) != TSNODE_OK ||
-        cr->dh(shared, peer->hs_local_eph_priv, peer->cfg.public_key) !=
-            TSNODE_OK) {
+    if (cr->random(peer->hs_local_eph_priv, TSNODE_WG_KEY_LEN) != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "WG init: random failed");
+        hs_clear_secrets(peer);
+        return TSNODE_ERR_CRYPTO;
+    }
+    if (cr->pubkey(eph_pub, peer->hs_local_eph_priv) != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "WG init: pubkey derive failed");
+        hs_clear_secrets(peer);
+        return TSNODE_ERR_CRYPTO;
+    }
+    if (cr->dh(shared, peer->hs_local_eph_priv, peer->cfg.public_key) !=
+        TSNODE_OK) {
+        TSNODE_LOGE(TAG, "WG init: DH(eph,remote) failed");
         hs_clear_secrets(peer);
         return TSNODE_ERR_CRYPTO;
     }
@@ -425,6 +437,7 @@ tsnode_err_t tsnode_wg_create_initiation(
                                      TSNODE_WG_KEY_LEN, dev->public_key,
                                      TSNODE_WG_KEY_LEN);
     if (err != TSNODE_OK) {
+        TSNODE_LOGE(TAG, "WG init: AEAD seal static failed: %d", err);
         hs_clear_secrets(peer);
         return err;
     }
