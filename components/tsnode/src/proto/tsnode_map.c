@@ -205,6 +205,43 @@ static const char *find_next_node_key(const char *search_from,
     return found + 64;
 }
 
+/* Find "Self" object and extract first "100.x.y.z/32" from Addrs array.
+ * Tailscale MapResponse format: "Self":{"Addrs":["100.x.y.z/32"],...}
+ * Returns true if a valid IP was extracted. */
+static bool find_self_addrs(const char *json, char *ip_out, size_t ip_out_len)
+{
+    const char *self_marker = "\"Self\":{";
+    const char *self_start = strstr(json, self_marker);
+    if (self_start == NULL) return false;
+
+    /* Find Addrs array within Self object (bounded search) */
+    const char *addrs_marker = "\"Addrs\":[";
+    const char *addrs = strstr(self_start, addrs_marker);
+    if (addrs == NULL) return false;
+
+    /* Ensure Addrs is within Self object (not in a peer) */
+    const char *peers_marker = "\"Peers\":[";
+    const char *peers = strstr(json, peers_marker);
+    if (peers != NULL && addrs > peers) return false;
+
+    /* Find first "100." in Addrs array */
+    const char *ip_start = strstr(addrs, "\"100.");
+    if (ip_start == NULL) return false;
+
+    /* Skip opening quote */
+    ip_start++;
+
+    /* Extract IP string (stop at quote, comma, or slash for CIDR) */
+    size_t len = 0;
+    const char *p = ip_start;
+    while (*p && *p != '"' && *p != ',' && *p != '/' && len < ip_out_len - 1) {
+        ip_out[len++] = *p++;
+    }
+    ip_out[len] = '\0';
+
+    return len > 0;
+}
+
 tsnode_err_t tsnode_map_parse_response(tsnode_map_netmap_t *netmap,
                                         const char *json, size_t json_len)
 {
@@ -220,22 +257,23 @@ tsnode_err_t tsnode_map_parse_response(tsnode_map_netmap_t *netmap,
     /* Extract Self.Key */
     find_next_node_key(json, netmap->self_node_key);
 
-    /* Extract self IP from Self.PrimaryRoutes or AllowedIPs.
-     * In practice, the node's own IP is in the first peer entry
-     * with matching key, or we look for "100." prefix in AllowedIPs.
-     * For simplicity, scan for first "100." occurrence. */
-    const char *ip_marker = "\"100.";
-    const char *ip_found = strstr(json, ip_marker);
-    if (ip_found != NULL) {
-        /* Go back to find opening quote */
-        const char *start = ip_found;
-        while (start > json && *(start - 1) != '"') start--;
-        size_t len = 0;
-        const char *p = start;
-        while (*p && *p != '"' && len < sizeof(netmap->self_ip) - 1) {
-            netmap->self_ip[len++] = *p++;
+    /* Extract self IP from Self.Addrs array (Tailscale MapResponse format).
+     * Falls back to scanning AllowedIPs if Self.Addrs not found. */
+    if (!find_self_addrs(json, netmap->self_ip, sizeof(netmap->self_ip))) {
+        /* Fallback: scan for "100." within "AllowedIPs" context */
+        const char *allowed = strstr(json, "\"AllowedIPs\"");
+        if (allowed != NULL) {
+            const char *ip = strstr(allowed, "\"100.");
+            if (ip != NULL) {
+                ip++; /* skip quote */
+                size_t len = 0;
+                const char *p = ip;
+                while (*p && *p != '"' && *p != '/' && len < sizeof(netmap->self_ip) - 1) {
+                    netmap->self_ip[len++] = *p++;
+                }
+                netmap->self_ip[len] = '\0';
+            }
         }
-        netmap->self_ip[len] = '\0';
     }
 
     /* Parse Peers array */

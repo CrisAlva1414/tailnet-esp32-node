@@ -623,6 +623,82 @@ static void test_map_framed_zstd_detected(void)
           TSNODE_ERR_NOT_IMPLEMENTED);
 }
 
+/* ---- MapResponse parser tests (Self IP + Peer endpoints) ---- */
+
+static void test_map_parse_self_addrs(void)
+{
+    /* Realistic MapResponse from Tailscale SaaS with Self.Addrs */
+    const char *json =
+        "{\"Self\":{"
+        "\"ID\":12345,"
+        "\"PublicKey\":\"nodekey:aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233\","
+        "\"HostInfo\":{\"OS\":\"linux\",\"Hostname\":\"esp32-test\"},"
+        "\"Addrs\":[\"100.67.12.69/32\"]"
+        "},"
+        "\"Peers\":["
+        "{"
+        "\"Key\":\"nodekey:1122334455667788112233445566778811223344556677881122334455667788\","
+        "\"HostInfo\":{\"Hostname\":\"nas\"},"
+        "\"AllowedIPs\":[\"100.75.129.85/32\"],"
+        "\"Endpoints\":[\"192.168.1.100:51820\"]"
+        "}"
+        "]}";
+
+    tsnode_map_netmap_t netmap;
+    tsnode_err_t err = tsnode_map_parse_response(&netmap, json, strlen(json));
+    CHECK(err == TSNODE_OK);
+    CHECK(strcmp(netmap.self_ip, "100.67.12.69") == 0);
+    CHECK(netmap.peer_count == 1);
+    CHECK(strcmp(netmap.peers[0].tailscale_ip, "100.75.129.85") == 0);
+    CHECK(strcmp(netmap.peers[0].endpoint_ip, "192.168.1.100") == 0);
+    CHECK(netmap.peers[0].endpoint_port == 51820);
+}
+
+static void test_map_parse_no_self_addrs(void)
+{
+    /* MapResponse without Self.Addrs (old format or error) — fallback should work */
+    const char *json =
+        "{\"Self\":{"
+        "\"ID\":12345,"
+        "\"PublicKey\":\"nodekey:aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233\""
+        "},"
+        "\"Peers\":["
+        "{"
+        "\"Key\":\"nodekey:1122334455667788112233445566778811223344556677881122334455667788\","
+        "\"AllowedIPs\":[\"100.75.129.85/32\"]"
+        "}"
+        "]}";
+
+    tsnode_map_netmap_t netmap;
+    tsnode_err_t err = tsnode_map_parse_response(&netmap, json, strlen(json));
+    CHECK(err == TSNODE_OK);
+    /* Fallback: first "100." found in AllowedIPs */
+    CHECK(strcmp(netmap.self_ip, "100.75.129.85") == 0);
+    CHECK(netmap.peer_count == 1);
+}
+
+static void test_map_parse_peer_endpoint_multi(void)
+{
+    /* Peer with multiple endpoints (only first is used) */
+    const char *json =
+        "{\"Self\":{"
+        "\"Addrs\":[\"100.64.0.1/32\"]"
+        "},"
+        "\"Peers\":["
+        "{"
+        "\"Key\":\"nodekey:1122334455667788112233445566778811223344556677881122334455667788\","
+        "\"AllowedIPs\":[\"100.64.0.2/32\"],"
+        "\"Endpoints\":[\"10.0.0.1:51820\",\"10.0.0.2:51821\"]"
+        "}"
+        "]}";
+
+    tsnode_map_netmap_t netmap;
+    tsnode_err_t err = tsnode_map_parse_response(&netmap, json, strlen(json));
+    CHECK(err == TSNODE_OK);
+    CHECK(strcmp(netmap.peers[0].endpoint_ip, "10.0.0.1") == 0);
+    CHECK(netmap.peers[0].endpoint_port == 51820);
+}
+
 int main(void)
 {
     RUN(test_hpack_register_vector);
@@ -640,6 +716,9 @@ int main(void)
     RUN(test_map_framed_valid);
     RUN(test_map_framed_bad_length);
     RUN(test_map_framed_zstd_detected);
+    RUN(test_map_parse_self_addrs);
+    RUN(test_map_parse_no_self_addrs);
+    RUN(test_map_parse_peer_endpoint_multi);
 
     printf("%d/%d tests passed\n", tests_run - tests_failed, tests_run);
     return tests_failed == 0 ? 0 : 1;
