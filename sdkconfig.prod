@@ -1,0 +1,18 @@
+# sdkconfig.prod — Build de producción (Release)
+#
+# Seleccionar con: SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.prod"
+#
+# Flash encryption Release + NVS encryption (ADR-0003).
+# Este archivo SOLO se usa para builds de producción.
+# NUNCA flashear un dispositivo Development con esta configuración.
+
+# Flash encryption: Release mode (ADR-0003)
+CONFIG_SECURE_FLASH_ENC_ENABLED=y
+CONFIG_SECURE_FLASH_ENCRYPTION_MODE_RELEASE=y
+
+# UART ROM download mode: limitar a comandos básicos (ADR-0003)
+CONFIG_SECURE_UART_ROM_DL_MODE=y
+
+# NVS encryption con esquema flash-encryption-based (ADR-0003)
+CONFIG_NVS_ENCRYPTION=y
+CONFIG_NVS_SEC_KEY_PROTECT_USING_FLASH_ENC=y

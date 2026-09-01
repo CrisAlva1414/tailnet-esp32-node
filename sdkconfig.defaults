@@ -1,10 +1,12 @@
 # sdkconfig.defaults — tailnet-esp32-node
 #
-# Aplicado sobre los defaults de ESP-IDF en cada build nuevo (borrar el
-# sdkconfig local para regenerar). Lo que NO está acá a propósito: flash
-# encryption, NVS encryption y Secure Boot — esos se activan solo en la
-# preparación de una build de producción con su propio proceso de eFuses
-# (ADR-0003); ninguna imagen de banco sale del laboratorio del usuario.
+# Base común para todos los builds. Seleccionar perfil específico:
+#   Desarrollo: SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.dev"
+#   Producción: SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.prod"
+#
+# Flash encryption, NVS encryption y Secure Boot se activan SOLO
+# en sdkconfig.prod (ADR-0003). Ninguna imagen de banco sale del
+# laboratorio del usuario.
 
 # Hardware real detectado: M5Stack Core 2, 16 MB flash (banco de pruebas,
 # sesión 2026-08-20-banco-pruebas-core2).

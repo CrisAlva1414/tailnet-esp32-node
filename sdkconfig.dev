@@ -1,0 +1,18 @@
+# sdkconfig.dev — Build de desarrollo (banco de pruebas)
+#
+# Seleccionar con: SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.dev"
+# O simplemente usar sdkconfig.defaults (que NO activa flash encryption).
+#
+# Este archivo documenta explícitamente las opciones de desarrollo.
+# Los builds de desarrollo NUNCA salen del banco de pruebas (ADR-0003).
+
+# Flash encryption: OFF (desarrollo, banco de pruebas)
+# La flash queda legible-en-claro; aceptado para iteración rápida.
+# CONFIG_SECURE_FLASH_ENC_ENABLED is not set
+
+# NVS encryption: OFF (desarrollo)
+# Las credenciales en NVS están en claro; aceptado para banco de pruebas.
+# CONFIG_NVS_ENCRYPTION is not set
+
+# JTAG: habilitado para debugging
+# CONFIG_SECURE_BOOT_ALLOW_JTAG is not set
